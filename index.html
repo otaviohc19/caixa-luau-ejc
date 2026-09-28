@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Caixa Lual</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="gate-screen" id="gateScreen">
+  <div class="idle-glow"></div>
+  <img class="idle-logo" src="ejc-logo.png" alt="Logo EJC">
+  <h2 class="idle-title">Caixa Lual</h2>
+  <p class="idle-sub">Área restrita à equipe</p>
+  <div class="gate-form">
+    <input type="text" id="gateUserInput" placeholder="Usuário" autocomplete="off" autocapitalize="off">
+    <input type="password" id="gatePassInput" placeholder="Senha" autocomplete="off">
+    <button class="btn-primary" type="button" onclick="tentarLogin()">Entrar</button>
+    <div class="gate-error" id="gateError"></div>
+  </div>
+</div>
+
+<div class="idle-screen" id="idleScreen" onclick="dismissIdle()">
+  <div class="idle-glow"></div>
+  <img class="idle-logo" src="ejc-logo.png" alt="Logo EJC">
+  <h2 class="idle-title">Caixa Lual</h2>
+  <p class="idle-sub">Encontro de Jovens com Cristo</p>
+  <div class="idle-tap">Toque para começar</div>
+</div>
+
+<header class="topbar">
+  <div class="top-row">
+    <div class="brand"><span class="flame">🔥</span><h1>Caixa Lual</h1></div>
+    <span class="caixa-badge" id="caixaBadge">Caixa</span>
+  </div>
+  <div class="top-sub">Vendas offline, sem complicação</div>
+</header>
+
+<main>
+
+  <!-- VENDER -->
+  <section class="view active" id="view-vender">
+    <div class="today-bar">
+      <div class="tb-stat"><span class="tb-label">Vendas</span><span class="tb-value" id="tbCount">0</span></div>
+      <div class="tb-stat"><span class="tb-label">Total do caixa</span><span class="tb-value" id="tbTotal">R$ 0,00</span></div>
+      <button class="tb-undo" id="undoBtn" onclick="desfazerUltimaVenda()">↩ Desfazer última</button>
+    </div>
+
+    <div class="section-title">Produtos</div>
+    <div class="cat-chip-row" id="catChipRow"></div>
+    <div class="product-grid" id="productGrid"></div>
+    <div class="empty-hint" id="noProductsHint" style="display:none;">Nenhum produto cadastrado ainda. Vá em "Produtos" pra cadastrar o cardápio.</div>
+
+    <div class="cart-card" id="cartCard" style="display:none;">
+      <div class="section-title" style="margin-top:0;">Pedido</div>
+      <div id="cartItems"></div>
+      <div class="cart-total-row">
+        <span class="label">Total</span>
+        <span class="value" id="cartTotal">R$ 0,00</span>
+      </div>
+
+      <div class="pay-methods">
+        <button class="pay-btn" data-pay="dinheiro" onclick="selectPayment('dinheiro')">💵 Dinheiro</button>
+        <button class="pay-btn" data-pay="pix" onclick="selectPayment('pix')">📱 Pix</button>
+        <button class="pay-btn" data-pay="cartao" onclick="selectPayment('cartao')">💳 Cartão</button>
+      </div>
+
+      <div class="troco-box" id="trocoBox">
+        <label>Valor recebido em dinheiro</label>
+        <input type="text" inputmode="decimal" id="recebidoInput" placeholder="0,00" oninput="calcTroco()">
+        <div class="troco-result" id="trocoResult"></div>
+      </div>
+
+      <button class="finalize-btn" id="finalizeBtn" onclick="finalizarVenda()" disabled>Finalizar venda</button>
+      <button class="clear-cart-link" onclick="limparCarrinho()">Limpar pedido</button>
+    </div>
+  </section>
+
+  <!-- PRODUTOS -->
+  <section class="view" id="view-produtos">
+    <div class="section-title" id="prodFormTitle">Cadastrar produto</div>
+    <div class="form-card">
+      <div class="form-row">
+        <label>Nome do produto</label>
+        <input type="text" id="prodNome" placeholder="Ex: Espetinho de carne">
+      </div>
+      <div class="form-grid2">
+        <div class="form-row">
+          <label>Preço (R$)</label>
+          <input type="text" inputmode="decimal" id="prodPreco" placeholder="0,00" oninput="renderComboEditor()">
+        </div>
+        <div class="form-row">
+          <label>Categoria</label>
+          <input type="text" id="prodCategoria" placeholder="Ex: Espetinhos">
+        </div>
+      </div>
+
+      <label class="combo-toggle">
+        <input type="checkbox" id="prodCombo" onchange="renderComboEditor()">
+        <span>É um combo (vários itens por um preço só)</span>
+      </label>
+
+      <div class="combo-editor" id="comboEditor">
+        <div class="combo-add-row">
+          <select id="comboSelect"></select>
+          <input type="text" inputmode="numeric" id="comboQty" value="1">
+          <button class="btn-secondary" type="button" onclick="addComboComponent()">+ Item</button>
+        </div>
+        <div id="comboItems"></div>
+        <div class="combo-hint" id="comboHint"></div>
+      </div>
+
+      <button class="btn-primary" onclick="salvarProduto()" id="salvarProdBtn">Adicionar produto</button>
+      <button class="clear-cart-link" id="cancelEditBtn" style="display:none;" onclick="resetProductForm()">Cancelar edição</button>
+    </div>
+
+    <div class="section-title">Cardápio cadastrado</div>
+    <div id="productList"></div>
+    <div class="empty-hint" id="noProductsHint2" style="display:none;">Nenhum produto ainda.</div>
+  </section>
+
+  <!-- RELATORIO -->
+  <section class="view" id="view-relatorio">
+    <div class="filter-row">
+      <select id="filtroCaixa" onchange="renderRelatorio()"></select>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat-card wide">
+        <div class="st-label">Total geral</div>
+        <div class="st-value" id="repTotal">R$ 0,00</div>
+      </div>
+      <div class="stat-card">
+        <div class="st-label">💵 Dinheiro</div>
+        <div class="st-value" id="repDinheiro">R$ 0,00</div>
+      </div>
+      <div class="stat-card">
+        <div class="st-label">📱 Pix</div>
+        <div class="st-value" id="repPix">R$ 0,00</div>
+      </div>
+      <div class="stat-card">
+        <div class="st-label">💳 Cartão</div>
+        <div class="st-value" id="repCartao">R$ 0,00</div>
+      </div>
+      <div class="stat-card">
+        <div class="st-label">Nº de vendas</div>
+        <div class="st-value" id="repCount">0</div>
+      </div>
+    </div>
+
+    <button class="btn-primary" style="margin-top:16px;" onclick="abrirFechamento()">🧾 Fechar caixa (conferir valores)</button>
+
+    <div class="section-title">Vendas registradas</div>
+    <div class="cart-card" id="salesListCard">
+      <div id="salesList"></div>
+      <div class="empty-hint" id="noSalesHint" style="display:none;">Nenhuma venda registrada ainda.</div>
+    </div>
+
+    <div class="io-row">
+      <button class="btn-secondary" onclick="exportarDados()">⬇️ Exportar dados</button>
+      <button class="btn-secondary" onclick="document.getElementById('importFile').click()">⬆️ Importar (consolidar)</button>
+    </div>
+    <input type="file" id="importFile" accept=".json,application/json" style="display:none;" onchange="importarDados(event)">
+  </section>
+
+  <!-- CONFIG -->
+  <section class="view" id="view-config">
+    <div class="section-title" style="margin-top:0;">Aparência</div>
+    <div class="theme-row" id="themeRow">
+      <button class="theme-btn" data-theme-opt="light" onclick="setTheme('light')"><span class="icon">☀️</span>Claro</button>
+      <button class="theme-btn" data-theme-opt="dark" onclick="setTheme('dark')"><span class="icon">🌙</span>Escuro</button>
+      <button class="theme-btn" data-theme-opt="auto" onclick="setTheme('auto')"><span class="icon">🔄</span>Automático</button>
+    </div>
+
+    <div class="section-title">Conta</div>
+    <div class="form-card" id="loginSection"></div>
+
+    <div id="caixaNomeRow">
+      <div class="section-title">Este caixa</div>
+      <div class="info-box">
+        Tudo aqui funciona <strong>offline</strong>, salvo direto neste aparelho. Se vocês forem usar mais de um caixa (celulares diferentes), dê um nome diferente pra cada um. No fim do evento, cada caixa exporta os dados e um único aparelho importa todos pra consolidar o relatório.
+      </div>
+      <div class="form-card">
+        <div class="form-row">
+          <label>Nome deste caixa</label>
+          <input type="text" id="caixaNomeInput" placeholder="Ex: Caixa 1">
+        </div>
+        <button class="btn-primary" onclick="salvarNomeCaixa()">Salvar</button>
+      </div>
+    </div>
+
+    <div id="resetDataCard">
+      <div class="section-title">Dados</div>
+      <div class="form-card">
+        <button class="btn-secondary btn-danger" style="width:100%;" onclick="resetarTudo()">Apagar produtos e vendas deste aparelho</button>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<nav class="bottomnav">
+  <button class="active" data-view="vender" onclick="switchView('vender')"><span class="icon">🛒</span>Vender</button>
+  <button data-view="produtos" onclick="switchView('produtos')"><span class="icon">📋</span>Produtos</button>
+  <button data-view="relatorio" onclick="switchView('relatorio')"><span class="icon">📊</span>Relatório</button>
+  <button data-view="config" onclick="switchView('config')"><span class="icon">⚙️</span>Config</button>
+</nav>
+
+<div class="modal-root" id="modalRoot"></div>
+<div class="toast" id="toast"></div>
+
+<script src="script.js"></script>
+</body>
+</html>

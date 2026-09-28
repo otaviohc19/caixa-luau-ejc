@@ -13,8 +13,8 @@
    Deixe a lista vazia ([]) pra desativar o login (app fica aberto pra
    qualquer um, como antes). */
 var USERS = [
-  // { user: 'otavio',  pass: 'trocar123', name: 'Otávio', admin: true },
-  // { user: 'maria',   pass: 'trocar456', name: 'Maria',  admin: false },
+  { user: 'otavio',  pass: 'ejc2026', name: 'Otávio', admin: true },
+  { user: 'ejc',   pass: 'teste123', name: 'EJC',  admin: false }
 ];
 
 var KEYS = {

@@ -469,3 +469,13 @@ table.rep-table td { padding: 6px 0; }
 .pin-status { margin: 0; font-size: 13.5px; color: var(--text-secondary); line-height: 1.5; }
 .pin-status.on { color: var(--success-dark); font-weight: 700; }
 .pin-status + .btn-primary { margin-top: 12px; }
+
+/* ---- Conexão / filtros ---- */
+.net-banner {
+  margin-top: 10px; padding: 8px 12px; border-radius: 12px; font-size: 12.5px; font-weight: 700;
+  background: rgba(255,255,255,0.22); color: #fff;
+}
+.filter-row select { min-width: 0; }
+.filter-refresh { padding: 0 16px; font-size: 18px; line-height: 1; flex: 0 0 auto; }
+.sale-row span.sr-del { display: inline-block; width: 24px; }
+.btn-primary:disabled { opacity: 0.45; }

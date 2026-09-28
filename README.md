@@ -1,67 +1,57 @@
 # Caixa Lual
 
-App de caixa/PDV offline para eventos do EJC (lual, festas, bazares).
-
-## Como usar
-
-1. Abra o `index.html` em qualquer navegador (Chrome, Safari etc.), no celular ou no computador.
-2. Não precisa instalar nada nem ter servidor. Mantenha todos os arquivos juntos na mesma pasta.
-3. Depois de aberto, funciona **offline**: os dados ficam salvos no navegador daquele aparelho (localStorage).
+App de caixa (PDV) para eventos do EJC. Roda no navegador (celular ou computador) e usa o
+**Supabase** como banco: cardápio, usuários e vendas ficam num lugar só, compartilhados
+entre todos os caixas. **Precisa de internet** (wifi do local).
 
 ## Funcionalidades
 
-- **Tela de descanso** com a logo do EJC: aparece ao abrir e volta sozinha após 90s sem uso (não aparece com uma janela aberta, tipo no meio do fechamento).
-- **Vender**: monta o pedido tocando nos produtos, escolhe Dinheiro/Pix/Cartão e calcula o troco.
-- **Contador do caixa**: número de vendas e total deste caixa sempre visíveis na tela de venda.
-- **Desfazer última venda**: apaga a última venda deste caixa, com opção de voltar o pedido pro carrinho pra corrigir.
-- **Produtos e combos**: cadastro do cardápio. Combos juntam vários itens por um preço só e mostram quanto o cliente economiza.
-- **Relatório**: total geral e por forma de pagamento, lista de vendas, filtro por caixa.
-- **Fechamento de caixa**: resumo + conferência do dinheiro da gaveta (fundo de troco + vendas em dinheiro = esperado), mostrando se bateu, sobrou ou faltou.
-- **Login por usuário** (opcional): cadastre a equipe direto no código (arquivo `script.js`, lista `USERS` no topo). Cada pessoa loga com usuário e senha próprios; quem é `admin: true` acessa Produtos, Config completo e pode apagar vendas/dados — quem é `admin: false` só vende e vê o relatório. Sem ninguém cadastrado, o app fica aberto (como antes).
-- **Tema** claro, escuro ou automático.
+- **Login por usuário e senha**, com dois perfis: `admin` (produtos, apagar vendas) e `operador` (só vende e consulta).
+- **Vender**: monta o pedido, escolhe Dinheiro/Pix/Cartão, calcula o troco. A venda vai direto pro banco.
+- **Produtos e combos** (admin): cadastra uma vez e todos os caixas enxergam o cardápio.
+- **Minhas vendas hoje** e **Desfazer última venda** (operador desfaz a própria venda até 10 min depois; admin, qualquer uma).
+- **Relatório consolidado** de todos os caixas, por forma de pagamento, com filtro por caixa e por período ("hoje" vira às 5h, então evento que passa da meia-noite não quebra).
+- **Fechamento de caixa**: confere o dinheiro da gaveta (fundo de troco + vendas em dinheiro).
+- **Exportar backup** (JSON) e **apagar todas as vendas** (admin, exige digitar APAGAR).
+- Tela de descanso com a logo, tema claro/escuro/automático.
+- Os dados se atualizam sozinhos a cada 20 s (e ao voltar pro app ou reconectar). Se a conexão cair, aparece um aviso e a venda **não** é perdida em silêncio: o pedido continua na tela pra tentar de novo, sem duplicar.
 
-## Cadastrando a equipe (login)
+## Configurando o Supabase (uma vez)
 
-Abra `script.js` e edite a lista `USERS`, logo no topo do arquivo:
+1. Crie um projeto no [Supabase](https://supabase.com).
+2. No **SQL Editor**, cole e rode o conteúdo de `supabase/schema.sql`.
+3. Em **Authentication → Sign In / Providers**, desligue **Allow new users to sign up**.
+4. Em **Authentication → Users → Add user → Create new user**, crie cada pessoa com e-mail `usuario@lual.app`, uma senha e **Auto Confirm User** marcado. (No app a pessoa digita só `usuario`.)
+5. Em **Table Editor → profiles**, ajuste `name` (nome que aparece no app e nos relatórios) e marque `is_admin` de quem for admin.
+6. No topo de `script.js`, confira `SUPABASE_URL` e `SUPABASE_KEY` (chave **publishable**, começa com `sb_publishable_`).
 
-```js
-var USERS = [
-  { user: 'otavio', pass: 'suaSenha1', name: 'Otávio', admin: true },
-  { user: 'maria',  pass: 'suaSenha2', name: 'Maria',  admin: false },
-];
-```
+Pra tirar alguém, apague o usuário em Authentication → Users.
 
-- `user` / `pass`: o que a pessoa digita pra entrar.
-- `name`: aparece no topo do app e também vira o nome do caixa dela nos relatórios (não precisa mais digitar manualmente).
-- `admin: true`: acessa Produtos, Config completo e pode apagar vendas/dados. `admin: false`: só vende e consulta o relatório.
+> **Projeto gratuito pausa após 1 semana sem uso.** Antes do evento, abra o painel do Supabase e confira se está ativo (se estiver pausado, é só clicar em restaurar).
 
-Depois de editar, reimplante o site (arraste a pasta de novo no mesmo projeto do Netlify) pra valer pra todo mundo. Deixe `USERS = []` pra manter o app sem login, aberto pra qualquer um com o link.
+## Rodando e publicando
 
-**Atenção:** como é um site sem servidor, essa lista fica visível pra quem souber inspecionar o código da página (view-source). Serve como controle de acesso pra uso interno do evento, não como segurança de nível bancário. Evite reaproveitar senhas importantes nela.
-
-## Vários caixas (vários celulares)
-
-Cada aparelho roda separado, sem sincronizar em tempo real. No fim do evento:
-
-1. Em cada caixa: Relatório → **Exportar dados** (baixa um `.json`).
-2. Escolha um aparelho "consolidador" e mande os arquivos pra ele (WhatsApp, Bluetooth etc.).
-3. Nele: Relatório → **Importar (consolidar)**, um arquivo por vez. Vendas repetidas são ignoradas.
-4. O relatório passa a mostrar todos os caixas, com filtro individual.
+- Local: abra a pasta com o Live Server (ou qualquer servidor estático) e acesse `index.html`.
+- Publicar: qualquer hospedagem estática (Netlify, GitHub Pages...). Publique a pasta inteira, **incluindo `vendor/`**.
 
 ## Estrutura
 
 ```
 caixa-lual-src/
-├── index.html    → estrutura das telas
-├── styles.css    → visual (cores, temas, layout)
-├── script.js     → lógica (vendas, combos, login/usuários, fechamento, exportar/importar)
-├── ejc-logo.png  → logo da tela de descanso
+├── index.html         → estrutura das telas
+├── styles.css         → visual (cores, temas, layout)
+├── script.js          → lógica (login, vendas, combos, relatório, Supabase)
+├── vendor/supabase.js → cliente oficial do Supabase (supabase-js 2.117.2)
+├── supabase/schema.sql→ tabelas e regras de acesso do banco
+├── ejc-logo.png       → logo da tela de descanso
 └── README.md
 ```
 
-Sem build, sem backend, sem framework. Só a fonte "Plus Jakarta Sans" vem do Google Fonts; sem internet, cai pra fonte padrão do sistema.
+Sem build, sem framework. Só a fonte "Plus Jakarta Sans" vem do Google Fonts (sem internet, cai pra fonte do sistema).
 
-## Observações
+## Segurança
 
-- O login é uma trava contra acesso indevido, não é segurança de nível bancário (a lista de usuários fica no próprio código, ver seção acima).
-- Limpar dados do navegador ou usar aba anônima faz a pessoa precisar logar de novo naquele aparelho — mas não apaga produtos/vendas de outros aparelhos, só o que estava salvo ali.
+- A chave `publishable` é feita pra ficar no código do site. O que protege os dados são as regras de acesso (RLS) em `supabase/schema.sql`: sem login, ninguém lê nem grava; só admin altera produtos; operador só registra vendas e desfaz a própria nos 10 minutos seguintes.
+- **Nunca** coloque no código a chave `secret` / `service_role`.
+- As senhas ficam no Supabase Auth (com hash), não no código.
+- Não há mais lista de usuários no código. Se uma versão antiga do repositório tinha senhas reais, elas continuam no histórico do Git: use senhas novas.

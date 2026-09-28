@@ -1,63 +1,64 @@
 /* =========================================================
-   Caixa Lual — lógica do app
+   Caixa luau — lógica do app (versão com Supabase)
+   Dados (produtos, vendas, usuários) ficam no Supabase e são
+   compartilhados entre todos os caixas. Precisa de internet.
    ========================================================= */
 
-/* Lista de quem pode acessar o app. Fica junto com o código publicado,
-   ou seja, vale pra TODOS os aparelhos que abrirem o site — não é preciso
-   configurar em cada celular. Pra adicionar/remover/trocar senha de
-   alguém, edite aqui e reimplante (mesma pasta de novo no Netlify).
+/* --- Configuração do Supabase -------------------------------------
+   A chave "publishable" é PÚBLICA por natureza (pode ficar no código).
+   Quem protege os dados são as regras (RLS) do banco — ver
+   supabase/schema.sql. NUNCA coloque aqui a chave "secret"/service_role. */
+var SUPABASE_URL = 'https://sxxpjgivnvgkdmxmvfar.supabase.co';
+var SUPABASE_KEY = 'sb_publishable_GD3sTzj2-qe0RXf742tw1w_kF0feLPD';
 
-   admin: true  → acessa Produtos, apaga vendas/dados
-   admin: false → só vende e vê o relatório
+/* O login é "usuário + senha", mas o Supabase Auth usa e-mail. O app
+   completa com este domínio: "maria" vira "maria@luau.app".
+   (Nenhum e-mail é enviado — é só um identificador.) */
+var EMAIL_DOMAIN = 'luau.app';
 
-   Deixe a lista vazia ([]) pra desativar o login (app fica aberto pra
-   qualquer um, como antes). */
-var USERS = [
-  { user: 'otavio',  pass: 'ejc2026', name: 'Otávio', admin: true },
-  { user: 'ejc',   pass: 'teste123', name: 'EJC',  admin: false }
-];
+var POLL_MS = 20000;        // de quanto em quanto tempo atualiza os dados
+var REQUEST_TIMEOUT_MS = 15000;
+var DAY_START_HOUR = 5;     // o "dia" vira às 5h (evento que passa da meia-noite)
+var UNDO_WINDOW_MIN = 10;   // igual à regra sales_delete do banco
 
-var KEYS = {
-  products: 'lual_products',
-  sales: 'lual_sales',
-  caixa: 'lual_caixa_name',
-  theme: 'lual_theme',
-  fundo: 'lual_fundo',
-  loggedUser: 'lual_logged_user'
-};
+var KEYS = { theme: 'luau_theme', fundo: 'luau_fundo' };
 
 var state = {
   products: [],
   sales: [],
-  caixaName: 'Caixa 1',
+  caixaName: '',
   cart: [],
   selectedCategory: 'Todos',
   payment: null,
-  currentUser: null,
+  currentUser: null,   // { id, username, name, admin }
   editingId: null,
-  comboDraft: []
+  comboDraft: [],
+  saving: false,
+  pendingSale: null,   // { id, sig } — deixa o "tentar de novo" idempotente
+  mutations: 0,        // sobe a cada alteração local (evita resposta velha sobrescrever)
+  loading: false,
+  loaded: false
 };
 
-/* ---------- Storage ---------- */
+/* ---------- Storage local (só preferências deste aparelho) ---------- */
 function lsGet(k, fallback) {
   try { var v = localStorage.getItem(k); return v === null ? fallback : v; } catch (e) { return fallback; }
 }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
 
-function loadState() {
-  try { state.products = JSON.parse(lsGet(KEYS.products, '[]')) || []; } catch (e) { state.products = []; }
-  try { state.sales = JSON.parse(lsGet(KEYS.sales, '[]')) || []; } catch (e) { state.sales = []; }
-  state.caixaName = lsGet(KEYS.caixa, 'Caixa 1') || 'Caixa 1';
-}
-function saveProducts() { lsSet(KEYS.products, JSON.stringify(state.products)); }
-function saveSales() { lsSet(KEYS.sales, JSON.stringify(state.sales)); }
-
 /* ---------- Utils ---------- */
 function el(id) { return document.getElementById(id); }
 function fmtMoney(v) { return (Number(v) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }); }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
-function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+function uuid() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  var b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  var s = Array.prototype.map.call(b, function (x) { return ('0' + x.toString(16)).slice(-2); }).join('');
+  return s.slice(0, 8) + '-' + s.slice(8, 12) + '-' + s.slice(12, 16) + '-' + s.slice(16, 20) + '-' + s.slice(20);
+}
 function parseMoney(str) {
   if (str === null || str === undefined) return 0;
   var s = String(str).trim().replace(/\s/g, '').replace('R$', '');
@@ -68,6 +69,15 @@ function parseMoney(str) {
 function timeStr(iso) {
   return new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 }
+function dateTimeStr(iso) {
+  var d = new Date(iso);
+  return ('0' + d.getDate()).slice(-2) + '/' + ('0' + (d.getMonth() + 1)).slice(-2) + ' ' + timeStr(iso);
+}
+function dayKey(d) {
+  var t = new Date(new Date(d).getTime() - DAY_START_HOUR * 3600 * 1000);
+  return t.getFullYear() + '-' + (t.getMonth() + 1) + '-' + t.getDate();
+}
+function isToday(iso) { return dayKey(iso) === dayKey(Date.now()); }
 function payLabel(p) { return p === 'dinheiro' ? 'Dinheiro' : (p === 'pix' ? 'Pix' : 'Cartão'); }
 function summarizeItems(items) { return items.map(function (i) { return i.qty + 'x ' + i.name; }).join(', '); }
 function showToast(msg) {
@@ -75,7 +85,7 @@ function showToast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(showToast._t);
-  showToast._t = setTimeout(function () { t.classList.remove('show'); }, 2000);
+  showToast._t = setTimeout(function () { t.classList.remove('show'); }, 2600);
 }
 
 /* Cria elementos DOM: h('div', {className:'x', onclick:fn}, filho1, filho2...) */
@@ -97,6 +107,112 @@ function h(tag, props) {
   }
   return node;
 }
+
+/* ---------- Supabase ---------- */
+function fetchWithTimeout(url, opts) {
+  opts = opts || {};
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, REQUEST_TIMEOUT_MS);
+  if (opts.signal) opts.signal.addEventListener('abort', function () { ctrl.abort(); });
+  return fetch(url, Object.assign({}, opts, { signal: ctrl.signal })).finally(function () { clearTimeout(timer); });
+}
+
+if (!window.supabase || !window.supabase.createClient) {
+  document.body.innerHTML = '<p style="padding:24px;font-family:sans-serif">Não foi possível carregar o app (arquivo vendor/supabase.js ausente). Confira se a pasta <b>vendor</b> foi publicada junto.</p>';
+  throw new Error('supabase-js não carregou');
+}
+var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storageKey: 'luau-auth' },
+  global: { fetch: fetchWithTimeout }
+});
+
+function isNetErr(e) {
+  var m = String((e && (e.message || e.name)) || e || '').toLowerCase();
+  return /failed to fetch|networkerror|network request|load failed|abort|timeout|fetch/.test(m);
+}
+function friendlyError(e) {
+  if (isNetErr(e)) return 'Sem conexão com o servidor. Confira o wifi.';
+  if (e && (e.code === '42501' || /row-level security|permission/i.test(e.message || ''))) return 'Sem permissão pra isso.';
+  return (e && e.message) || 'Erro inesperado.';
+}
+function setOnline(ok) {
+  var b = el('netBanner');
+  if (b) b.style.display = ok ? 'none' : 'block';
+}
+/* Executa uma chamada do Supabase sem nunca lançar exceção. */
+async function safe(fn) {
+  try {
+    var r = await fn();
+    setOnline(!(r && r.error && isNetErr(r.error)));
+    return r || { data: null, error: null };
+  } catch (e) {
+    if (isNetErr(e)) setOnline(false);
+    return { data: null, error: e };
+  }
+}
+/* Busca uma tabela inteira (o Supabase devolve no máximo 1000 linhas por vez). */
+async function fetchAll(table, orderCol) {
+  var out = [], from = 0, size = 1000;
+  while (true) {
+    var r = await safe(function () {
+      return sb.from(table).select('*')
+        .order(orderCol, { ascending: true }).order('id', { ascending: true })
+        .range(from, from + size - 1);
+    });
+    if (r.error) return { data: null, error: r.error };
+    out = out.concat(r.data || []);
+    if (!r.data || r.data.length < size) break;
+    from += size;
+  }
+  return { data: out, error: null };
+}
+function mapProduct(r) {
+  return { id: r.id, name: r.name, price: Number(r.price), category: r.category, isCombo: !!r.is_combo, components: r.components || [] };
+}
+function mapSale(r) {
+  return {
+    id: r.id, userId: r.user_id, timestamp: r.created_at, items: r.items || [], total: Number(r.total),
+    payment: r.payment, recebido: r.recebido === null ? null : Number(r.recebido),
+    troco: r.troco === null ? null : Number(r.troco), caixa: r.caixa
+  };
+}
+
+/* Carrega produtos e vendas. silent = não mostra aviso de erro (usado no polling). */
+async function loadAll(silent) {
+  if (state.loading || !state.currentUser) return false;
+  state.loading = true;
+  var version = state.mutations;
+  var p = await fetchAll('products', 'created_at');
+  var s = p.error ? { error: p.error } : await fetchAll('sales', 'created_at');
+  state.loading = false;
+  if (p.error || s.error) {
+    if (!silent) showToast(friendlyError(p.error || s.error));
+    return false;
+  }
+  if (version !== state.mutations) return false;   // algo mudou localmente durante a busca
+  state.products = p.data.map(mapProduct);
+  state.sales = s.data.map(mapSale);
+  state.loaded = true;
+  renderAll();
+  return true;
+}
+function refreshData(manual) {
+  loadAll(!manual).then(function (ok) { if (manual && ok) showToast('Atualizado'); });
+}
+function renderAll() {
+  renderCategoryChips(); renderProductGrid(); renderTodayBar();
+  var v = currentView();
+  if (v === 'produtos') renderProductList();
+  if (v === 'relatorio') { populateFiltroCaixa(); renderRelatorio(); }
+}
+var pollTimer = null;
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(function () { if (!document.hidden) loadAll(true); }, POLL_MS);
+}
+function stopPolling() { clearInterval(pollTimer); pollTimer = null; }
+document.addEventListener('visibilitychange', function () { if (!document.hidden) loadAll(true); });
+window.addEventListener('online', function () { loadAll(true); });
 
 /* ---------- Tema ---------- */
 function getSavedTheme() { return lsGet(KEYS.theme, 'auto'); }
@@ -130,7 +246,6 @@ function confirmModal(opts) {
     opts.icon ? h('div', { className: 'modal-icon' }, opts.icon) : null,
     h('h3', { className: 'modal-title', text: opts.title }),
     opts.text ? h('p', { className: 'modal-sub', text: opts.text }) : null,
-    opts.body || null,
     h('div', { className: 'modal-actions' },
       h('button', {
         className: opts.danger ? 'btn-primary btn-primary-danger' : 'btn-primary', type: 'button',
@@ -142,75 +257,108 @@ function confirmModal(opts) {
 }
 
 /* ---------- Login ---------- */
-function findUser(user, pass) {
-  var u = (user || '').trim().toLowerCase();
-  return USERS.filter(function (x) { return x.user.toLowerCase() === u && x.pass === pass; })[0] || null;
-}
-function getLoggedUser() {
-  if (!USERS.length) return null;
-  var saved = lsGet(KEYS.loggedUser, '');
-  if (!saved) return null;
-  return USERS.filter(function (x) { return x.user === saved; })[0] || null;
-}
-function isAdmin() { return !USERS.length || (state.currentUser && state.currentUser.admin); }
+function isAdmin() { return !!(state.currentUser && state.currentUser.admin); }
 
-function checkGate() {
-  if (!USERS.length) { el('gateScreen').classList.remove('active'); return; }
-  var u = getLoggedUser();
-  if (u) {
-    state.currentUser = u;
-    state.caixaName = u.name;
-    el('caixaBadge').textContent = u.name;
-    el('gateScreen').classList.remove('active');
-    return;
-  }
+function showGate(errMsg, showRetry) {
   el('gateScreen').classList.add('active');
+  el('gateError').textContent = errMsg || '';
+  el('gateRetry').style.display = showRetry ? 'block' : 'none';
   setTimeout(function () { el('gateUserInput').focus(); }, 100);
 }
-function tentarLogin() {
-  var user = el('gateUserInput').value;
+function hideGate() {
+  el('gateScreen').classList.remove('active');
+  el('gateError').textContent = '';
+  el('gateUserInput').value = '';
+  el('gatePassInput').value = '';
+}
+function setGateBusy(busy) {
+  el('gateBtn').disabled = busy;
+  el('gateBtn').textContent = busy ? 'Entrando…' : 'Entrar';
+}
+
+async function tentarLogin() {
+  var user = el('gateUserInput').value.trim().toLowerCase();
   var pass = el('gatePassInput').value;
-  var match = findUser(user, pass);
-  if (match) {
-    lsSet(KEYS.loggedUser, match.user);
-    state.currentUser = match;
-    state.caixaName = match.name;
-    lsSet(KEYS.caixa, match.name);
-    el('caixaBadge').textContent = match.name;
-    el('gateScreen').classList.remove('active');
-    el('gateError').textContent = '';
-    el('gateUserInput').value = ''; el('gatePassInput').value = '';
-    renderCategoryChips(); renderProductGrid(); renderTodayBar();
-    applyNavVisibility();
-  } else {
-    el('gateError').textContent = 'Usuário ou senha incorretos';
+  if (!user || !pass) { el('gateError').textContent = 'Digite usuário e senha'; return; }
+  var email = user.indexOf('@') !== -1 ? user : user + '@' + EMAIL_DOMAIN;
+  setGateBusy(true);
+  var r = await safe(function () { return sb.auth.signInWithPassword({ email: email, password: pass }); });
+  setGateBusy(false);
+  if (r.error) {
+    var msg = isNetErr(r.error) ? friendlyError(r.error)
+      : (r.error.status === 429 ? 'Muitas tentativas. Espere um minuto e tente de novo.' : 'Usuário ou senha incorretos');
+    el('gateError').textContent = msg;
     el('gatePassInput').value = '';
     el('gatePassInput').focus();
+    return;
   }
+  await afterLogin(r.data.user);
 }
-function fazerLogout() {
-  lsDel(KEYS.loggedUser);
-  state.currentUser = null;
+
+/* Busca o perfil (nome + admin) e liga o app. Devolve true se entrou. */
+async function afterLogin(user) {
+  var pr = await safe(function () { return sb.from('profiles').select('*').eq('id', user.id).maybeSingle(); });
+  if (pr.error && isNetErr(pr.error)) { showGate(friendlyError(pr.error), true); return false; }
+  if (pr.error || !pr.data) {
+    await safe(function () { return sb.auth.signOut({ scope: 'local' }); });
+    showGate('Perfil não encontrado. Peça pro admin conferir a tabela profiles.');
+    return false;
+  }
+  state.currentUser = { id: user.id, username: pr.data.username, name: pr.data.name, admin: !!pr.data.is_admin };
+  state.caixaName = pr.data.name;
+  el('caixaBadge').textContent = state.caixaName;
+  hideGate();
+  applyNavVisibility();
   doSwitchView('vender');
-  checkGate();
+  renderAll();
+  await loadAll(false);
+  startPolling();
+  return true;
 }
+
+async function boot() {
+  el('gateRetry').style.display = 'none';
+  var r = await safe(function () { return sb.auth.getSession(); });
+  var session = r.data && r.data.session;
+  if (!session) {
+    showGate(r.error && isNetErr(r.error) ? friendlyError(r.error) : '', !!(r.error && isNetErr(r.error)));
+    return;
+  }
+  await afterLogin(session.user);
+}
+
+function resetSession() {
+  stopPolling();
+  state.currentUser = null; state.products = []; state.sales = []; state.cart = [];
+  state.payment = null; state.pendingSale = null; state.loaded = false; state.saving = false;
+  closeModal();
+  el('idleScreen').classList.remove('active');
+  limparPagamento();
+  renderCart(); renderCategoryChips(); renderProductGrid(); renderTodayBar();
+  applyNavVisibility();
+  doSwitchView('vender');
+  showGate('');
+}
+async function fazerLogout() {
+  await safe(function () { return sb.auth.signOut({ scope: 'local' }); });
+  resetSession();
+}
+/* Se a sessão morrer sozinha (usuário removido, token inválido), volta pro login. */
+sb.auth.onAuthStateChange(function (event) {
+  if (event === 'SIGNED_OUT' && state.currentUser) setTimeout(resetSession, 0);
+});
 ['gateUserInput', 'gatePassInput'].forEach(function (id) {
-  var elm = el(id);
-  elm && elm.addEventListener('keydown', function (e) { if (e.key === 'Enter') tentarLogin(); });
+  el(id).addEventListener('keydown', function (e) { if (e.key === 'Enter') tentarLogin(); });
 });
 
 function renderLoginSection() {
   var box = el('loginSection');
-  if (!box) return;
   box.innerHTML = '';
-  if (!USERS.length) {
-    box.appendChild(h('p', { className: 'pin-status', text: 'Login desativado. Qualquer pessoa com o link acessa o app inteiro, sem se identificar.' }));
-    box.appendChild(h('p', { className: 'pin-status', style: 'margin-top:8px;', text: 'Pra ativar, peça pra cadastrar usuários no código (lista USERS) e reimplante o site.' }));
-    return;
-  }
   var u = state.currentUser;
   box.appendChild(h('p', { className: 'pin-status on', text: '👤 Logado como ' + (u ? u.name : '?') + (u && u.admin ? ' (admin)' : ' (operador)') }));
-  box.appendChild(h('p', { className: 'pin-status', style: 'margin-top:8px;', text: 'Pra adicionar, remover ou trocar a senha de alguém, peça uma atualização do código (lista USERS) e reimplante o site.' }));
+  if (isAdmin()) {
+    box.appendChild(h('p', { className: 'pin-status', style: 'margin-top:8px;', text: 'Pra adicionar ou remover gente, use Authentication → Users no painel do Supabase. O nome e o perfil de admin ficam na tabela profiles.' }));
+  }
   box.appendChild(h('button', { className: 'clear-cart-link', type: 'button', onclick: fazerLogout }, 'Sair (trocar de usuário)'));
 }
 
@@ -223,8 +371,7 @@ function applyNavVisibility() {
   var admin = isAdmin();
   var prodBtn = document.querySelector('.bottomnav button[data-view="produtos"]');
   if (prodBtn) prodBtn.style.display = admin ? '' : 'none';
-  var resetCard = el('resetDataCard');
-  if (resetCard) resetCard.style.display = admin ? '' : 'none';
+  el('resetDataCard').style.display = admin ? '' : 'none';
 }
 function switchView(name) {
   if (name === 'produtos' && !isAdmin()) { showToast('Só admins acessam Produtos'); return; }
@@ -238,30 +385,27 @@ function doSwitchView(name) {
   });
   if (name === 'vender') { renderCategoryChips(); renderProductGrid(); renderTodayBar(); }
   if (name === 'produtos') { renderProductList(); renderComboEditor(); }
-  if (name === 'relatorio') { populateFiltroCaixa(); renderRelatorio(); }
-  if (name === 'config') {
-    el('caixaNomeInput').value = state.caixaName;
-    el('caixaNomeRow').style.display = USERS.length ? 'none' : 'block';
-    applyTheme(getSavedTheme());
-    renderLoginSection();
-    applyNavVisibility();
-  }
+  if (name === 'relatorio') { populateFiltroCaixa(); renderRelatorio(); loadAll(true); }
+  if (name === 'config') { applyTheme(getSavedTheme()); renderLoginSection(); applyNavVisibility(); }
   window.scrollTo(0, 0);
 }
 
 /* ---------- Vender ---------- */
-function ownSales() { return state.sales.filter(function (s) { return s.caixa === state.caixaName; }); }
+function ownSales() {
+  if (!state.currentUser) return [];
+  return state.sales.filter(function (s) { return s.userId === state.currentUser.id; });
+}
 function lastOwnSale() {
-  for (var i = state.sales.length - 1; i >= 0; i--) if (state.sales[i].caixa === state.caixaName) return state.sales[i];
-  return null;
+  var mine = ownSales();
+  return mine.length ? mine[mine.length - 1] : null;
 }
 
 function renderTodayBar() {
-  var mine = ownSales();
+  var mine = ownSales().filter(function (s) { return isToday(s.timestamp); });
   var total = mine.reduce(function (s, x) { return s + x.total; }, 0);
   el('tbCount').textContent = mine.length;
   el('tbTotal').textContent = fmtMoney(total);
-  el('undoBtn').style.display = mine.length ? 'block' : 'none';
+  el('undoBtn').style.display = lastOwnSale() ? 'block' : 'none';
 }
 
 function renderCategoryChips() {
@@ -289,7 +433,16 @@ function comboLine(components) {
 function renderProductGrid() {
   var grid = el('productGrid');
   grid.innerHTML = '';
-  el('noProductsHint').style.display = state.products.length ? 'none' : 'block';
+  var hint = el('noProductsHint');
+  if (!state.loaded) {
+    hint.textContent = state.currentUser ? 'Carregando cardápio…' : '';
+    hint.style.display = state.currentUser ? 'block' : 'none';
+    return;
+  }
+  hint.textContent = isAdmin()
+    ? 'Nenhum produto cadastrado ainda. Vá em "Produtos" pra cadastrar o cardápio.'
+    : 'Nenhum produto cadastrado ainda. Peça pro admin cadastrar o cardápio.';
+  hint.style.display = state.products.length ? 'none' : 'block';
   state.products
     .filter(function (p) { return state.selectedCategory === 'Todos' || (p.category || 'Geral') === state.selectedCategory; })
     .forEach(function (p) {
@@ -380,7 +533,7 @@ function calcTroco() {
 }
 
 function updateFinalizeState() {
-  var valid = state.cart.length > 0 && !!state.payment;
+  var valid = state.cart.length > 0 && !!state.payment && !state.saving;
   if (state.payment === 'dinheiro') {
     var recebido = parseMoney(el('recebidoInput').value);
     valid = valid && recebido > 0 && round2(recebido) >= cartTotalValue();
@@ -388,53 +541,103 @@ function updateFinalizeState() {
   el('finalizeBtn').disabled = !valid;
 }
 
-function limparCarrinho() {
-  state.cart = [];
+function limparPagamento() {
   state.payment = null;
   document.querySelectorAll('.pay-btn').forEach(function (b) { b.classList.remove('selected'); });
   el('trocoBox').classList.remove('show');
   el('recebidoInput').value = '';
   el('trocoResult').textContent = '';
+}
+function limparCarrinho() {
+  state.cart = [];
+  state.pendingSale = null;
+  limparPagamento();
   renderCart();
 }
 
-function finalizarVenda() {
-  if (el('finalizeBtn').disabled) return;
+/* Assinatura do pedido: se o "tentar de novo" for do mesmo pedido, reaproveita o id
+   (assim uma venda que chegou no servidor mas cuja resposta se perdeu não duplica). */
+function saleSignature(recebido) {
+  return JSON.stringify([
+    state.cart.map(function (i) { return [i.productId, i.qty]; }),
+    cartTotalValue(), state.payment, recebido
+  ]);
+}
+
+async function finalizarVenda() {
+  if (el('finalizeBtn').disabled || state.saving || !state.currentUser) return;
   var total = cartTotalValue();
   var recebido = state.payment === 'dinheiro' ? round2(parseMoney(el('recebidoInput').value)) : null;
-  state.sales.push({
-    id: uid(),
-    timestamp: new Date().toISOString(),
-    items: state.cart.map(function (i) {
-      return { productId: i.productId, name: i.name, price: i.price, qty: i.qty, isCombo: i.isCombo, components: i.components };
-    }),
-    total: total,
+  var sig = saleSignature(recebido);
+  if (!state.pendingSale || state.pendingSale.sig !== sig) state.pendingSale = { id: uuid(), sig: sig };
+
+  var row = {
+    id: state.pendingSale.id,
+    caixa: state.caixaName,
     payment: state.payment,
+    total: total,
     recebido: recebido,
     troco: recebido !== null ? round2(recebido - total) : null,
-    caixa: state.caixaName
-  });
-  saveSales();
+    items: state.cart.map(function (i) {
+      return { productId: i.productId, name: i.name, price: i.price, qty: i.qty, isCombo: i.isCombo, components: i.components };
+    })
+  };
+
+  state.saving = true;
+  el('finalizeBtn').disabled = true;
+  el('finalizeBtn').textContent = 'Registrando…';
+  var r = await safe(function () { return sb.from('sales').insert(row).select(); });
+  state.saving = false;
+  el('finalizeBtn').textContent = 'Finalizar venda';
+
+  var duplicate = r.error && r.error.code === '23505';   // já tinha chegado numa tentativa anterior
+  if (r.error && !duplicate) {
+    updateFinalizeState();
+    showToast('Venda NÃO registrada: ' + friendlyError(r.error) + ' O pedido continua aqui, tente de novo.');
+    return;
+  }
+  state.mutations++;
+  if (!duplicate && r.data && r.data[0]) state.sales.push(mapSale(r.data[0]));
+  else loadAll(true);
   showToast('Venda registrada: ' + fmtMoney(total));
   limparCarrinho();
   renderTodayBar();
 }
 
 /* ---------- Desfazer última venda ---------- */
+async function deleteSaleById(id) {
+  var r = await safe(function () { return sb.from('sales').delete().eq('id', id).select(); });
+  if (r.error) return { ok: false, msg: friendlyError(r.error) };
+  if (!r.data || !r.data.length) {
+    return { ok: false, msg: isAdmin() ? 'Venda não encontrada (talvez já tenha sido apagada).' : 'Só dá pra desfazer vendas dos últimos ' + UNDO_WINDOW_MIN + ' minutos.' };
+  }
+  state.mutations++;
+  state.sales = state.sales.filter(function (x) { return x.id !== id; });
+  return { ok: true };
+}
+
 function desfazerUltimaVenda() {
   var s = lastOwnSale();
   if (!s) return;
-  var removeIt = function () {
-    state.sales = state.sales.filter(function (x) { return x.id !== s.id; });
-    saveSales();
-    renderTodayBar();
-  };
+  var busy = false;
+  function act(afterOk) {
+    return async function () {
+      if (busy) return;
+      busy = true;
+      var res = await deleteSaleById(s.id);
+      busy = false;
+      closeModal();
+      renderTodayBar();
+      if (!res.ok) { showToast(res.msg); return; }
+      afterOk();
+    };
+  }
   openModal(h('div', null,
     h('div', { className: 'modal-icon' }, '↩️'),
     h('h3', { className: 'modal-title', text: 'Desfazer a última venda?' }),
     h('div', { className: 'undo-summary' },
       h('div', { className: 'us-items', text: summarizeItems(s.items) }),
-      h('div', { className: 'us-meta', text: timeStr(s.timestamp) + ' · ' + payLabel(s.payment) }),
+      h('div', { className: 'us-meta', text: dateTimeStr(s.timestamp) + ' · ' + payLabel(s.payment) }),
       h('div', { className: 'us-total', text: fmtMoney(s.total) })
     ),
     s.payment === 'dinheiro'
@@ -442,32 +645,22 @@ function desfazerUltimaVenda() {
       : null,
     h('div', { className: 'modal-actions' },
       h('button', {
-        className: 'btn-primary', type: 'button', onclick: function () {
-          removeIt();
+        className: 'btn-primary', type: 'button', onclick: act(function () {
           state.cart = s.items.map(function (i) {
-            return { productId: i.productId || ('x' + uid()), name: i.name, price: i.price, qty: i.qty, isCombo: !!i.isCombo, components: i.components || [] };
+            return { productId: i.productId || ('x' + uuid()), name: i.name, price: i.price, qty: i.qty, isCombo: !!i.isCombo, components: i.components || [] };
           });
-          closeModal();
+          state.pendingSale = null;
           limparPagamento();
           renderCart();
           showToast('Venda desfeita — pedido voltou pro carrinho');
-        }
+        })
       }, 'Desfazer e corrigir o pedido'),
       h('button', {
-        className: 'btn-secondary', type: 'button', style: 'width:100%;', onclick: function () {
-          removeIt(); closeModal(); showToast('Venda desfeita');
-        }
+        className: 'btn-secondary', type: 'button', style: 'width:100%;', onclick: act(function () { showToast('Venda desfeita'); })
       }, 'Só desfazer'),
       h('button', { className: 'modal-cancel', type: 'button', onclick: closeModal }, 'Cancelar')
     )
   ));
-}
-function limparPagamento() {
-  state.payment = null;
-  document.querySelectorAll('.pay-btn').forEach(function (b) { b.classList.remove('selected'); });
-  el('trocoBox').classList.remove('show');
-  el('recebidoInput').value = '';
-  el('trocoResult').textContent = '';
 }
 
 /* ---------- Produtos / combos ---------- */
@@ -534,7 +727,8 @@ function resetProductForm() {
   renderComboEditor();
 }
 
-function salvarProduto() {
+async function salvarProduto() {
+  if (!isAdmin() || state.saving) return;
   var nome = el('prodNome').value.trim();
   var preco = round2(parseMoney(el('prodPreco').value));
   var isCombo = el('prodCombo').checked;
@@ -543,17 +737,29 @@ function salvarProduto() {
   if (!(preco > 0)) { showToast('Digite um preço válido'); return; }
   if (isCombo && !state.comboDraft.length) { showToast('Adicione pelo menos um item ao combo'); return; }
 
-  var data = { name: nome, price: preco, category: cat, isCombo: isCombo, components: isCombo ? state.comboDraft.slice() : [] };
-  if (state.editingId) {
-    var p = state.products.find(function (x) { return x.id === state.editingId; });
-    if (p) Object.assign(p, data);
+  var row = { name: nome, price: preco, category: cat, is_combo: isCombo, components: isCombo ? state.comboDraft.slice() : [] };
+  var editing = state.editingId;
+  state.saving = true;
+  el('salvarProdBtn').disabled = true;
+  var r = await safe(function () {
+    return editing
+      ? sb.from('products').update(row).eq('id', editing).select()
+      : sb.from('products').insert(row).select();
+  });
+  state.saving = false;
+  el('salvarProdBtn').disabled = false;
+
+  if (r.error) { showToast(friendlyError(r.error)); return; }
+  if (!r.data || !r.data.length) { showToast('Não foi possível salvar (sem permissão ou produto removido).'); return; }
+  state.mutations++;
+  var saved = mapProduct(r.data[0]);
+  if (editing) {
+    state.products = state.products.map(function (p) { return p.id === editing ? saved : p; });
     showToast('Produto atualizado');
   } else {
-    data.id = uid();
-    state.products.push(data);
+    state.products.push(saved);
     showToast(isCombo ? 'Combo adicionado' : 'Produto adicionado');
   }
-  saveProducts();
   resetProductForm();
   renderProductList();
   renderCategoryChips();
@@ -588,9 +794,12 @@ function excluirProduto(id) {
       ? 'Esse item faz parte de: ' + usedIn.map(function (x) { return x.name; }).join(', ') + '. Os combos continuam existindo.'
       : 'As vendas já registradas não são afetadas.',
     confirmLabel: 'Excluir', danger: true,
-    onConfirm: function () {
+    onConfirm: async function () {
+      var r = await safe(function () { return sb.from('products').delete().eq('id', id).select(); });
+      if (r.error) { showToast(friendlyError(r.error)); return; }
+      if (!r.data || !r.data.length) { showToast('Não foi possível excluir (sem permissão).'); return; }
+      state.mutations++;
       state.products = state.products.filter(function (x) { return x.id !== id; });
-      saveProducts();
       if (state.editingId === id) resetProductForm();
       renderProductList(); renderCategoryChips(); renderProductGrid(); renderComboEditor();
       showToast('Produto removido');
@@ -627,8 +836,10 @@ function populateFiltroCaixa() {
   sel.value = caixas.indexOf(current) !== -1 ? current : 'Todos';
 }
 
-function computeTotals(filtro) {
-  var sales = state.sales.filter(function (s) { return filtro === 'Todos' || s.caixa === filtro; });
+function computeTotals(filtro, periodo) {
+  var sales = state.sales.filter(function (s) {
+    return (filtro === 'Todos' || s.caixa === filtro) && (periodo === 'tudo' || isToday(s.timestamp));
+  });
   var t = { sales: sales, count: sales.length, total: 0, dinheiro: 0, pix: 0, cartao: 0 };
   sales.forEach(function (s) {
     t.total += s.total;
@@ -637,10 +848,13 @@ function computeTotals(filtro) {
   ['total', 'dinheiro', 'pix', 'cartao'].forEach(function (k) { t[k] = round2(t[k]); });
   return t;
 }
+function currentFilters() {
+  return { caixa: el('filtroCaixa').value || 'Todos', periodo: el('filtroPeriodo').value || 'hoje' };
+}
 
 function renderRelatorio() {
-  var filtro = el('filtroCaixa').value || 'Todos';
-  var t = computeTotals(filtro);
+  var f = currentFilters();
+  var t = computeTotals(f.caixa, f.periodo);
   el('repTotal').textContent = fmtMoney(t.total);
   el('repDinheiro').textContent = fmtMoney(t.dinheiro);
   el('repPix').textContent = fmtMoney(t.pix);
@@ -650,31 +864,33 @@ function renderRelatorio() {
   var listEl = el('salesList');
   listEl.innerHTML = '';
   el('noSalesHint').style.display = t.count ? 'none' : 'block';
+  var admin = isAdmin();
   t.sales.slice().reverse().forEach(function (s) {
     var summary = summarizeItems(s.items);
     listEl.appendChild(h('div', { className: 'sale-row' },
       h('div', { className: 'sr-left' },
         h('div', { text: summary.length > 34 ? summary.slice(0, 34) + '…' : summary }),
-        h('div', { className: 'sr-time', text: timeStr(s.timestamp) + ' · ' + s.caixa })
+        h('div', { className: 'sr-time', text: (f.periodo === 'tudo' ? dateTimeStr(s.timestamp) : timeStr(s.timestamp)) + ' · ' + s.caixa })
       ),
       h('span', { className: 'sr-badge badge-' + s.payment, text: payLabel(s.payment) }),
       h('span', { className: 'sr-value', text: fmtMoney(s.total) }),
-      h('button', { className: 'sr-del', type: 'button', 'aria-label': 'Apagar venda', onclick: function () { excluirVenda(s.id); } }, '✕')
+      admin
+        ? h('button', { className: 'sr-del', type: 'button', 'aria-label': 'Apagar venda', onclick: function () { excluirVenda(s.id); } }, '✕')
+        : h('span', { className: 'sr-del' })
     ));
   });
 }
 
 function excluirVenda(id) {
   var s = state.sales.find(function (x) { return x.id === id; });
-  if (!s) return;
-  if (!isAdmin()) { showToast('Só admins apagam vendas'); return; }
+  if (!s || !isAdmin()) return;
   confirmModal({
     icon: '🗑️', title: 'Apagar esta venda?',
-    text: summarizeItems(s.items) + ' · ' + fmtMoney(s.total) + ' · ' + payLabel(s.payment) + ' · ' + timeStr(s.timestamp),
+    text: summarizeItems(s.items) + ' · ' + fmtMoney(s.total) + ' · ' + payLabel(s.payment) + ' · ' + dateTimeStr(s.timestamp) + ' · ' + s.caixa,
     confirmLabel: 'Apagar venda', danger: true,
-    onConfirm: function () {
-      state.sales = state.sales.filter(function (x) { return x.id !== id; });
-      saveSales();
+    onConfirm: async function () {
+      var res = await deleteSaleById(id);
+      if (!res.ok) { showToast(res.msg); return; }
       populateFiltroCaixa(); renderRelatorio(); renderTodayBar();
       showToast('Venda apagada');
     }
@@ -683,8 +899,8 @@ function excluirVenda(id) {
 
 /* ---------- Fechamento de caixa ---------- */
 function abrirFechamento() {
-  var filtro = el('filtroCaixa').value || 'Todos';
-  var t = computeTotals(filtro);
+  var f = currentFilters();
+  var t = computeTotals(f.caixa, f.periodo);
 
   var fundoInput = h('input', { type: 'text', inputmode: 'decimal', placeholder: '0,00' });
   fundoInput.value = lsGet(KEYS.fundo, '');
@@ -716,7 +932,7 @@ function abrirFechamento() {
   openModal(h('div', null,
     h('div', { className: 'modal-icon' }, '🧾'),
     h('h3', { className: 'modal-title', text: 'Fechamento de caixa' }),
-    h('p', { className: 'modal-sub', text: filtro === 'Todos' ? 'Todos os caixas deste aparelho' : filtro }),
+    h('p', { className: 'modal-sub', text: (f.caixa === 'Todos' ? 'Todos os caixas' : f.caixa) + ' · ' + (f.periodo === 'tudo' ? 'todo o período' : 'hoje') }),
     h('div', { className: 'fc-summary' },
       row('Vendas', String(t.count)),
       row('💵 Dinheiro', fmtMoney(t.dinheiro)),
@@ -730,91 +946,61 @@ function abrirFechamento() {
     h('div', { className: 'form-row', style: 'margin-top:12px;' }, h('label', { text: 'Dinheiro contado na gaveta (R$)' }), contadoInput),
     diffBox,
     h('div', { className: 'modal-actions' },
-      h('button', { className: 'btn-primary', type: 'button', onclick: exportarDados }, '⬇️ Exportar dados'),
+      h('button', { className: 'btn-primary', type: 'button', onclick: exportarDados }, '⬇️ Exportar backup'),
       h('button', { className: 'modal-cancel', type: 'button', onclick: closeModal }, 'Fechar')
     )
   ));
   update();
 }
 
-/* ---------- Exportar / Importar ---------- */
+/* ---------- Exportar (backup) ---------- */
 function exportarDados() {
-  var payload = { app: 'caixa-lual', version: 2, products: state.products, sales: state.sales, caixa: state.caixaName, exportedAt: new Date().toISOString() };
+  var payload = { app: 'caixa-luau', version: 3, products: state.products, sales: state.sales, exportedBy: state.caixaName, exportedAt: new Date().toISOString() };
   var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   var url = URL.createObjectURL(blob);
   var stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
-  var a = h('a', { href: url, download: 'caixa-lual-' + (state.caixaName || 'dados').replace(/\s+/g, '_') + '-' + stamp + '.json' });
+  var a = h('a', { href: url, download: 'caixa-luau-backup-' + stamp + '.json' });
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-  showToast('Dados exportados');
+  showToast('Backup exportado');
 }
 
-function importarDados(event) {
-  var file = event.target.files[0];
-  if (!file) return;
-  var reader = new FileReader();
-  reader.onload = function (e) {
-    try {
-      var data = JSON.parse(e.target.result);
-      var ids = {};
-      state.sales.forEach(function (s) { ids[s.id] = true; });
-      var newSales = (data.sales || []).filter(function (s) { return s && s.id && !ids[s.id]; });
-      state.sales = state.sales.concat(newSales);
-      state.sales.sort(function (a, b) { return a.timestamp < b.timestamp ? -1 : 1; });
-      saveSales();
-
-      var names = {};
-      state.products.forEach(function (p) { names[p.name.toLowerCase()] = true; });
-      (data.products || []).forEach(function (p) {
-        if (p && p.name && !names[p.name.toLowerCase()]) { state.products.push(p); names[p.name.toLowerCase()] = true; }
-      });
-      saveProducts();
-
-      populateFiltroCaixa(); renderRelatorio(); renderCategoryChips(); renderProductGrid(); renderTodayBar();
-      showToast(newSales.length + ' venda(s) importada(s)');
-    } catch (err) {
-      showToast('Arquivo inválido');
-    }
-    event.target.value = '';
-  };
-  reader.readAsText(file);
-}
-
-/* ---------- Config ---------- */
-function salvarNomeCaixa() {
-  var nome = el('caixaNomeInput').value.trim();
-  if (!nome) { showToast('Digite um nome'); return; }
-  state.caixaName = nome;
-  lsSet(KEYS.caixa, nome);
-  el('caixaBadge').textContent = nome;
-  renderTodayBar();
-  showToast('Nome do caixa salvo');
-}
-
-function resetarTudo() {
-  if (!isAdmin()) { showToast('Só admins apagam os dados'); return; }
-  var t = computeTotals('Todos');
+/* ---------- Apagar todas as vendas (admin) ---------- */
+function apagarVendas() {
+  if (!isAdmin()) { showToast('Só admins apagam as vendas'); return; }
+  var t = computeTotals('Todos', 'tudo');
+  var typed = h('input', { type: 'text', placeholder: 'Digite APAGAR', autocomplete: 'off', autocapitalize: 'characters' });
+  var goBtn = h('button', { className: 'btn-primary btn-primary-danger', type: 'button', disabled: 'disabled' }, 'Apagar todas as vendas');
+  typed.addEventListener('input', function () {
+    if (typed.value.trim().toUpperCase() === 'APAGAR') goBtn.removeAttribute('disabled');
+    else goBtn.setAttribute('disabled', 'disabled');
+  });
+  goBtn.addEventListener('click', async function () {
+    goBtn.setAttribute('disabled', 'disabled');
+    var r = await safe(function () {
+      return sb.from('sales').delete({ count: 'exact' }).neq('id', '00000000-0000-0000-0000-000000000000');
+    });
+    if (r.error) { showToast(friendlyError(r.error)); return; }
+    state.mutations++;
+    state.sales = [];
+    lsDel(KEYS.fundo);
+    closeModal();
+    renderTodayBar(); populateFiltroCaixa(); renderRelatorio();
+    showToast('Vendas apagadas');
+  });
   openModal(h('div', null,
     h('div', { className: 'modal-icon' }, '⚠️'),
-    h('h3', { className: 'modal-title', text: 'Apagar tudo deste aparelho?' }),
-    h('p', { className: 'modal-sub', text: 'Isso não tem volta. Confira o que vai ser apagado:' }),
+    h('h3', { className: 'modal-title', text: 'Apagar TODAS as vendas?' }),
+    h('p', { className: 'modal-sub', text: 'Vale pra todos os caixas, não só este aparelho, e não tem volta.' }),
     h('div', { className: 'fc-summary' },
-      h('div', { className: 'fc-row' }, h('span', { text: 'Produtos cadastrados' }), h('span', { className: 'fc-val', text: String(state.products.length) })),
       h('div', { className: 'fc-row' }, h('span', { text: 'Vendas registradas' }), h('span', { className: 'fc-val', text: String(t.count) })),
       h('div', { className: 'fc-row fc-total' }, h('span', { text: 'Total em vendas' }), h('span', { className: 'fc-val', text: fmtMoney(t.total) }))
     ),
-    t.count ? h('p', { className: 'fc-note', text: 'Recomendado: exporte os dados antes, pra não perder o relatório.' }) : null,
+    t.count ? h('p', { className: 'fc-note', text: 'Recomendado: exporte um backup antes.' }) : null,
+    h('div', { className: 'form-row' }, typed),
     h('div', { className: 'modal-actions' },
-      t.count ? h('button', { className: 'btn-secondary', type: 'button', style: 'width:100%;', onclick: exportarDados }, '⬇️ Exportar antes') : null,
-      h('button', {
-        className: 'btn-primary btn-primary-danger', type: 'button', onclick: function () {
-          state.products = []; state.sales = []; state.cart = [];
-          saveProducts(); saveSales(); lsDel(KEYS.fundo);
-          closeModal(); resetProductForm(); limparCarrinho();
-          renderProductList(); renderCategoryChips(); renderProductGrid(); renderTodayBar();
-          showToast('Dados apagados');
-        }
-      }, 'Apagar tudo'),
+      t.count ? h('button', { className: 'btn-secondary', type: 'button', style: 'width:100%;', onclick: exportarDados }, '⬇️ Exportar backup antes') : null,
+      goBtn,
       h('button', { className: 'modal-cancel', type: 'button', onclick: closeModal }, 'Cancelar')
     )
   ));
@@ -829,7 +1015,7 @@ function dismissIdle() {
   resetIdleTimer();
 }
 function showIdleScreen() {
-  if (isModalOpen()) { resetIdleTimer(); return; }
+  if (isModalOpen() || !state.currentUser) { resetIdleTimer(); return; }
   el('idleScreen').classList.add('active');
 }
 function resetIdleTimer() {
@@ -844,12 +1030,8 @@ function resetIdleTimer() {
 
 /* ---------- Init ---------- */
 applyTheme(getSavedTheme());
-loadState();
-el('caixaBadge').textContent = state.caixaName;
-renderCategoryChips();
-renderProductGrid();
 renderCart();
 renderTodayBar();
 resetIdleTimer();
-checkGate();
 applyNavVisibility();
+boot();

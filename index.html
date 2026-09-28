@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Caixa Lual</title>
+<title>Caixa Luau</title>
 <meta name="robots" content="noindex, nofollow">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -12,33 +12,35 @@
 </head>
 <body>
 
-<div class="gate-screen" id="gateScreen">
+<div class="gate-screen active" id="gateScreen">
   <div class="idle-glow"></div>
   <img class="idle-logo" src="ejc-logo.png" alt="Logo EJC">
-  <h2 class="idle-title">Caixa Lual</h2>
+  <h2 class="idle-title">Caixa Luau</h2>
   <p class="idle-sub">Área restrita à equipe</p>
   <div class="gate-form">
     <input type="text" id="gateUserInput" placeholder="Usuário" autocomplete="off" autocapitalize="off">
     <input type="password" id="gatePassInput" placeholder="Senha" autocomplete="off">
-    <button class="btn-primary" type="button" onclick="tentarLogin()">Entrar</button>
+    <button class="btn-primary" type="button" id="gateBtn" onclick="tentarLogin()">Entrar</button>
     <div class="gate-error" id="gateError"></div>
+    <button class="clear-cart-link" type="button" id="gateRetry" style="display:none;" onclick="boot()">Tentar de novo</button>
   </div>
 </div>
 
 <div class="idle-screen" id="idleScreen" onclick="dismissIdle()">
   <div class="idle-glow"></div>
   <img class="idle-logo" src="ejc-logo.png" alt="Logo EJC">
-  <h2 class="idle-title">Caixa Lual</h2>
+  <h2 class="idle-title">Caixa Luau</h2>
   <p class="idle-sub">Encontro de Jovens com Cristo</p>
   <div class="idle-tap">Toque para começar</div>
 </div>
 
 <header class="topbar">
   <div class="top-row">
-    <div class="brand"><span class="flame">🔥</span><h1>Caixa Lual</h1></div>
+    <div class="brand"><span class="flame">🔥</span><h1>Caixa Luau</h1></div>
     <span class="caixa-badge" id="caixaBadge">Caixa</span>
   </div>
-  <div class="top-sub">Vendas offline, sem complicação</div>
+  <div class="top-sub">Caixa do Luau</div>
+  <div class="net-banner" id="netBanner" style="display:none;">⚠️ Sem conexão com o servidor. Tentando reconectar…</div>
 </header>
 
 <main>
@@ -46,8 +48,8 @@
   <!-- VENDER -->
   <section class="view active" id="view-vender">
     <div class="today-bar">
-      <div class="tb-stat"><span class="tb-label">Vendas</span><span class="tb-value" id="tbCount">0</span></div>
-      <div class="tb-stat"><span class="tb-label">Total do caixa</span><span class="tb-value" id="tbTotal">R$ 0,00</span></div>
+      <div class="tb-stat"><span class="tb-label">Minhas vendas hoje</span><span class="tb-value" id="tbCount">0</span></div>
+      <div class="tb-stat"><span class="tb-label">Meu total hoje</span><span class="tb-value" id="tbTotal">R$ 0,00</span></div>
       <button class="tb-undo" id="undoBtn" onclick="desfazerUltimaVenda()">↩ Desfazer última</button>
     </div>
 
@@ -128,6 +130,11 @@
   <section class="view" id="view-relatorio">
     <div class="filter-row">
       <select id="filtroCaixa" onchange="renderRelatorio()"></select>
+      <select id="filtroPeriodo" onchange="renderRelatorio()">
+        <option value="hoje">Hoje (vira às 5h)</option>
+        <option value="tudo">Todo o período</option>
+      </select>
+      <button class="btn-secondary filter-refresh" type="button" aria-label="Atualizar" onclick="refreshData(true)">↻</button>
     </div>
 
     <div class="stat-grid">
@@ -162,10 +169,8 @@
     </div>
 
     <div class="io-row">
-      <button class="btn-secondary" onclick="exportarDados()">⬇️ Exportar dados</button>
-      <button class="btn-secondary" onclick="document.getElementById('importFile').click()">⬆️ Importar (consolidar)</button>
+      <button class="btn-secondary" onclick="exportarDados()">⬇️ Exportar backup</button>
     </div>
-    <input type="file" id="importFile" accept=".json,application/json" style="display:none;" onchange="importarDados(event)">
   </section>
 
   <!-- CONFIG -->
@@ -180,24 +185,10 @@
     <div class="section-title">Conta</div>
     <div class="form-card" id="loginSection"></div>
 
-    <div id="caixaNomeRow">
-      <div class="section-title">Este caixa</div>
-      <div class="info-box">
-        Tudo aqui funciona <strong>offline</strong>, salvo direto neste aparelho. Se vocês forem usar mais de um caixa (celulares diferentes), dê um nome diferente pra cada um. No fim do evento, cada caixa exporta os dados e um único aparelho importa todos pra consolidar o relatório.
-      </div>
-      <div class="form-card">
-        <div class="form-row">
-          <label>Nome deste caixa</label>
-          <input type="text" id="caixaNomeInput" placeholder="Ex: Caixa 1">
-        </div>
-        <button class="btn-primary" onclick="salvarNomeCaixa()">Salvar</button>
-      </div>
-    </div>
-
     <div id="resetDataCard">
       <div class="section-title">Dados</div>
       <div class="form-card">
-        <button class="btn-secondary btn-danger" style="width:100%;" onclick="resetarTudo()">Apagar produtos e vendas deste aparelho</button>
+        <button class="btn-secondary btn-danger" style="width:100%;" onclick="apagarVendas()">Apagar todas as vendas (todos os caixas)</button>
       </div>
     </div>
   </section>
@@ -214,6 +205,7 @@
 <div class="modal-root" id="modalRoot"></div>
 <div class="toast" id="toast"></div>
 
+<script src="vendor/supabase.js"></script>
 <script src="script.js"></script>
 </body>
 </html>

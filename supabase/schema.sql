@@ -1,5 +1,5 @@
 -- =====================================================================
--- Caixa Lual — esquema do Supabase
+-- Caixa Luau — esquema do Supabase
 -- Rode UMA vez no SQL Editor do painel (cole tudo e clique em Run).
 -- =====================================================================
 

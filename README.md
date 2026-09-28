@@ -1,4 +1,4 @@
-# Caixa EJC
+# Caixa Luau
 
 App de caixa (PDV) para eventos do EJC. Roda no navegador (celular ou computador) e usa o
 **Supabase** como banco: cardápio, usuários e vendas ficam num lugar só, compartilhados
@@ -21,7 +21,7 @@ entre todos os caixas. **Precisa de internet** (wifi do local).
 1. Crie um projeto no [Supabase](https://supabase.com).
 2. No **SQL Editor**, cole e rode o conteúdo de `supabase/schema.sql`.
 3. Em **Authentication → Sign In / Providers**, desligue **Allow new users to sign up**.
-4. Em **Authentication → Users → Add user → Create new user**, crie cada pessoa com e-mail `usuario@luau.app`, uma senha e **Auto Confirm User** marcado. (No app a pessoa digita só `usuario`.)
+4. Em **Authentication → Users → Add user → Create new user**, crie cada pessoa com e-mail `usuario@lual.app`, uma senha e **Auto Confirm User** marcado. (No app a pessoa digita só `usuario`.)
 5. Em **Table Editor → profiles**, ajuste `name` (nome que aparece no app e nos relatórios) e marque `is_admin` de quem for admin.
 6. No topo de `script.js`, confira `SUPABASE_URL` e `SUPABASE_KEY` (chave **publishable**, começa com `sb_publishable_`).
 

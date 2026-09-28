@@ -1,5 +1,5 @@
 /* =========================================================
-   Caixa luau — lógica do app (versão com Supabase)
+   Caixa Luau — lógica do app (versão com Supabase)
    Dados (produtos, vendas, usuários) ficam no Supabase e são
    compartilhados entre todos os caixas. Precisa de internet.
    ========================================================= */
@@ -12,16 +12,16 @@ var SUPABASE_URL = 'https://sxxpjgivnvgkdmxmvfar.supabase.co';
 var SUPABASE_KEY = 'sb_publishable_GD3sTzj2-qe0RXf742tw1w_kF0feLPD';
 
 /* O login é "usuário + senha", mas o Supabase Auth usa e-mail. O app
-   completa com este domínio: "maria" vira "maria@luau.app".
+   completa com este domínio: "maria" vira "maria@lual.app".
    (Nenhum e-mail é enviado — é só um identificador.) */
-var EMAIL_DOMAIN = 'luau.app';
+var EMAIL_DOMAIN = 'lual.app';
 
 var POLL_MS = 20000;        // de quanto em quanto tempo atualiza os dados
 var REQUEST_TIMEOUT_MS = 15000;
 var DAY_START_HOUR = 5;     // o "dia" vira às 5h (evento que passa da meia-noite)
 var UNDO_WINDOW_MIN = 10;   // igual à regra sales_delete do banco
 
-var KEYS = { theme: 'luau_theme', fundo: 'luau_fundo' };
+var KEYS = { theme: 'lual_theme', fundo: 'lual_fundo' };
 
 var state = {
   products: [],
@@ -122,7 +122,7 @@ if (!window.supabase || !window.supabase.createClient) {
   throw new Error('supabase-js não carregou');
 }
 var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
-  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storageKey: 'luau-auth' },
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storageKey: 'lual-auth' },
   global: { fetch: fetchWithTimeout }
 });
 

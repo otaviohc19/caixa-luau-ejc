@@ -1,57 +1,103 @@
-# Caixa Luau
+# Caixa EJC
 
-App de caixa (PDV) para eventos do EJC. Roda no navegador (celular ou computador) e usa o
-**Supabase** como banco: cardápio, usuários e vendas ficam num lugar só, compartilhados
-entre todos os caixas. **Precisa de internet** (wifi do local).
+Sistema de caixa e **controle financeiro de eventos** do EJC. Roda no navegador (celular ou
+computador) e usa o **Supabase** como banco: eventos, cardápios, vendas, gastos e usuários ficam
+num lugar só, compartilhados entre todos. **Precisa de internet** (wifi do local).
 
-## Funcionalidades
+## Dois perfis, dois layouts
 
-- **Login por usuário e senha**, com dois perfis: `admin` (produtos, apagar vendas) e `operador` (só vende e consulta).
-- **Vender**: monta o pedido, escolhe Dinheiro/Pix/Cartão, calcula o troco. A venda vai direto pro banco.
-- **Produtos e combos** (admin): cadastra uma vez e todos os caixas enxergam o cardápio.
-- **Minhas vendas hoje** e **Desfazer última venda** (operador desfaz a própria venda até 10 min depois; admin, qualquer uma).
-- **Relatório consolidado** de todos os caixas, por forma de pagamento, com filtro por caixa e por período ("hoje" vira às 5h, então evento que passa da meia-noite não quebra).
-- **Fechamento de caixa**: confere o dinheiro da gaveta (fundo de troco + vendas em dinheiro).
-- **Exportar backup** (JSON) e **apagar todas as vendas** (admin, exige digitar APAGAR).
-- Tela de descanso com a logo, tema claro/escuro/automático.
-- Os dados se atualizam sozinhos a cada 20 s (e ao voltar pro app ou reconectar). Se a conexão cair, aparece um aviso e a venda **não** é perdida em silêncio: o pedido continua na tela pra tentar de novo, sem duplicar.
+**Operador** (caixa): layout de celular com barra inferior.
+- **Vender** no evento aberto (troco, dinheiro/Pix/crédito/débito, combos) e "Minhas vendas hoje".
+- **Cancelar venda**: o operador pede o cancelamento (com motivo) e o **admin aprova ou nega**. Aprovado, ele pode "Refazer pedido".
+- **Relatório** do evento, **Fechamento de caixa** e **Config** (tema, sair).
 
-## Configurando o Supabase (uma vez)
+**Admin**: layout com **barra lateral** (no celular vira menu).
+- **Visão geral**: receita, gastos, lucro, ticket médio, reembolsos pendentes e gráficos (receita × gastos × lucro, vendas por pagamento, vendas por horário, produtos mais vendidos, gastos por categoria, comparativo entre eventos).
+- **Vender** e **Vendas** (relatório, fechamento, cancelar/reativar venda, exportar backup e CSV).
+- **Cancelamentos**: fila de pedidos dos operadores (aprovar/negar com resposta) e histórico. O admin cancela direto, sem pedido.
+- **Cardápio** do evento (produtos e combos; dá pra copiar o cardápio de outro evento).
+- **Estoque e margem**: comprado, vendido, saldo, custo médio, margem e lucro bruto por produto.
+- **Gastos**: estoque, decoração, estrutura, serviços e outros, com data, quem pagou do bolso e controle de reembolso. Exporta CSV.
+- **Contas**: saldo bancário, caixa de cada evento e outras contas; **transferências** entre elas (ex.: banco → caixa do evento como fundo de troco), ajuste de saldo e histórico de movimentações.
+- **Eventos**: cria, abre, encerra, renomeia e exclui eventos; mostra receita, gastos e lucro de cada um.
+- **Configurações**: tema, conta e apagar as vendas do evento (exige digitar APAGAR).
 
-1. Crie um projeto no [Supabase](https://supabase.com).
-2. No **SQL Editor**, cole e rode o conteúdo de `supabase/schema.sql`.
-3. Em **Authentication → Sign In / Providers**, desligue **Allow new users to sign up**.
-4. Em **Authentication → Users → Add user → Create new user**, crie cada pessoa com e-mail `usuario@lual.app`, uma senha e **Auto Confirm User** marcado. (No app a pessoa digita só `usuario`.)
-5. Em **Table Editor → profiles**, ajuste `name` (nome que aparece no app e nos relatórios) e marque `is_admin` de quem for admin.
-6. No topo de `script.js`, confira `SUPABASE_URL` e `SUPABASE_KEY` (chave **publishable**, começa com `sb_publishable_`).
+### Como os eventos funcionam
+- Todo produto, venda e gasto pertence a **um evento**.
+- Só **um evento fica aberto** por vez, e é nele que os caixas vendem. O banco recusa venda em evento encerrado.
+- O admin escolhe qual evento está olhando (seletor na barra lateral). Mudar de evento não afeta quem está vendendo.
+- Abrir outro evento encerra o que estava aberto. Evento com vendas ou gastos não pode ser excluído.
 
-Pra tirar alguém, apague o usuário em Authentication → Users.
+### Formas de pagamento
+Dinheiro, Pix, **Crédito** e **Débito** (vendas antigas "Cartão" continuam aparecendo como "Cartão (antigo)").
 
-> **Projeto gratuito pausa após 1 semana sem uso.** Antes do evento, abra o painel do Supabase e confira se está ativo (se estiver pausado, é só clicar em restaurar).
+### Como as contas e os saldos funcionam
+O saldo de cada conta é calculado pelo banco de dados a partir do que já é registrado:
+
+`saldo = saldo inicial + transferências recebidas − enviadas + vendas − gastos pagos com a conta`
+
+- **Vendas em dinheiro** entram no **caixa do evento** (cada evento ganha o seu automaticamente).
+- **Pix, crédito e débito** entram na **conta que recebe** (padrão: a primeira conta bancária; dá pra trocar por evento em Eventos → Renomear).
+- **Gastos**: em "Pago com" escolha a conta (debita o saldo) ou "do bolso de alguém" (entra nos reembolsos pendentes; ao reembolsar, escolha de qual conta saiu o dinheiro).
+- **Transferência não é receita nem gasto**: só muda o dinheiro de lugar, então o lucro do evento não muda. O lado "Fora do sistema" serve pra depósito, saque, doação etc.
+- **Venda cancelada** sai dos totais, do estoque e dos saldos, mas continua registrada (com motivo e quem cancelou).
+- O app considera Pix e cartão recebidos na hora da venda (não calcula taxa da maquininha nem prazo de compensação). Use "Ajustar saldo" pra acertar com o extrato.
+
+### Como o estoque é calculado
+Não existe um cadastro separado de estoque. Ao registrar um **gasto da categoria Estoque** e ligá-lo a um
+produto com a **quantidade comprada**, o app calcula sozinho:
+- **Comprado** = soma das quantidades dos gastos ligados ao produto;
+- **Vendido** = unidades nas vendas do evento (item de combo conta nos produtos que o compõem);
+- **Saldo** = comprado − vendido (vermelho se vendeu mais do que o comprado registrado);
+- **Custo unitário** = média paga por unidade; **margem** = preço − custo; o custo do combo é a soma dos itens.
+Gastos de estoque sem produto (gelo, copos) entram no total de gastos, mas não na margem de cada produto.
+
+## Configurando o Supabase
+
+Ordem importante (rode no **SQL Editor**, uma vez cada):
+
+1. `supabase/schema.sql` (perfis, produtos, vendas e regras de acesso).
+2. `supabase/002_eventos_e_financeiro.sql` (eventos, gastos, regras novas).
+   Quem já tem dados: os produtos e vendas existentes viram o evento **"Luau"** (renomeie em Eventos).
+3. `supabase/003_pagamentos_cancelamentos_contas.sql` (crédito/débito, cancelamento com autorização, contas e transferências).
+   Cria uma "Conta bancária" e um caixa para cada evento já existente.
+4. Authentication → Sign In / Providers: desligue **Allow new users to sign up**.
+5. Authentication → Users → Add user: e-mail `usuario@lual.app`, senha, **Auto Confirm User**. (No app a pessoa digita só `usuario`.)
+6. Table Editor → `profiles`: ajuste `name` e marque `is_admin` de quem for admin.
+7. No topo de `script.js`, confira `SUPABASE_URL` e `SUPABASE_KEY` (chave **publishable**).
+
+> ⚠️ **Rode cada migração e publique a versão do app correspondente juntas.** A 002 exige evento em venda e produto; a 003 troca
+> "cartão" por crédito/débito e o operador deixa de apagar venda direto (passa a pedir cancelamento). Uma versão antiga do app
+> deixa de funcionar direito depois da migração nova.
+
+> O projeto gratuito pausa após 1 semana sem uso: confira no painel antes do evento.
 
 ## Rodando e publicando
-
-- Local: abra a pasta com o Live Server (ou qualquer servidor estático) e acesse `index.html`.
+- Local: abra a pasta com o Live Server (ou outro servidor estático).
 - Publicar: qualquer hospedagem estática (Netlify, GitHub Pages...). Publique a pasta inteira, **incluindo `vendor/`**.
+- O nome no topo (`APP_NAME`) fica no começo do `script.js`.
 
 ## Estrutura
-
 ```
 caixa-lual-src/
-├── index.html         → estrutura das telas
-├── styles.css         → visual (cores, temas, layout)
-├── script.js          → lógica (login, vendas, combos, relatório, Supabase)
-├── vendor/supabase.js → cliente oficial do Supabase (supabase-js 2.117.2)
-├── supabase/schema.sql→ tabelas e regras de acesso do banco
-├── ejc-logo.png       → logo da tela de descanso
+├── index.html                          → telas (operador e admin)
+├── styles.css                          → visual, temas, layout, barra lateral
+├── script.js                           → núcleo: login, dados, vendas, relatório, fechamento
+├── admin.js                            → admin: eventos, gastos, estoque, gráficos, CSV
+├── main.js                             → inicialização (carrega por último)
+├── vendor/supabase.js                  → supabase-js 2.117.2
+├── vendor/chart.umd.js                 → Chart.js 4.5.1
+├── supabase/schema.sql                 → banco, parte 1
+├── supabase/002_eventos_e_financeiro.sql → banco, parte 2 (eventos e gastos)
+├── supabase/003_pagamentos_cancelamentos_contas.sql → banco, parte 3 (pagamentos, cancelamentos, contas)
+├── ejc-logo.png
 └── README.md
 ```
 
-Sem build, sem framework. Só a fonte "Plus Jakarta Sans" vem do Google Fonts (sem internet, cai pra fonte do sistema).
-
 ## Segurança
-
-- A chave `publishable` é feita pra ficar no código do site. O que protege os dados são as regras de acesso (RLS) em `supabase/schema.sql`: sem login, ninguém lê nem grava; só admin altera produtos; operador só registra vendas e desfaz a própria nos 10 minutos seguintes.
+- A chave `publishable` é feita pra ficar no código. Quem protege os dados são as regras (RLS) do banco:
+  sem login ninguém lê nem grava; só admin altera produtos, eventos e **vê gastos, contas e transferências**; operador só registra
+  vendas (em evento aberto) e **pede** cancelamento das próprias (quem decide é o admin). Ninguém edita venda direto: o cancelamento
+  passa por funções do banco que conferem se quem chama é admin.
 - **Nunca** coloque no código a chave `secret` / `service_role`.
 - As senhas ficam no Supabase Auth (com hash), não no código.
-- Não há mais lista de usuários no código. Se uma versão antiga do repositório tinha senhas reais, elas continuam no histórico do Git: use senhas novas.

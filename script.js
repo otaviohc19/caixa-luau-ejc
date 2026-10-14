@@ -16,16 +16,34 @@ var SUPABASE_KEY = 'sb_publishable_GD3sTzj2-qe0RXf742tw1w_kF0feLPD';
    (Nenhum e-mail é enviado — é só um identificador.) */
 var EMAIL_DOMAIN = 'lual.app';
 
+/* Nome que aparece no topo, no login e na barra lateral. */
+var APP_NAME = 'Caixa EJC';
+
 var POLL_MS = 20000;        // de quanto em quanto tempo atualiza os dados
 var REQUEST_TIMEOUT_MS = 15000;
 var DAY_START_HOUR = 5;     // o "dia" vira às 5h (evento que passa da meia-noite)
-var UNDO_WINDOW_MIN = 10;   // igual à regra sales_delete do banco
 
-var KEYS = { theme: 'lual_theme', fundo: 'lual_fundo' };
+var KEYS = { theme: 'lual_theme', fundo: 'lual_fundo', eventId: 'lual_event_id' };
+
+/* Formas de pagamento. ('cartao' só existe em vendas antigas.) */
+var PAYMENTS = [
+  { id: 'dinheiro', label: 'Dinheiro', icon: '💵' },
+  { id: 'pix',      label: 'Pix',      icon: '📱' },
+  { id: 'credito',  label: 'Crédito',  icon: '💳' },
+  { id: 'debito',   label: 'Débito',   icon: '💳' }
+];
 
 var state = {
-  products: [],
-  sales: [],
+  events: [],          // todos os eventos
+  event: null,         // evento em uso (operador: o aberto; admin: o selecionado)
+  products: [],        // cardápio do evento
+  sales: [],           // vendas do evento
+  expenses: [],        // gastos do evento (só admin)
+  totals: [],          // totais de todos os eventos (só admin)
+  cancels: [],         // pedidos de cancelamento do evento (operador vê os próprios)
+  cancelStatus: null,  // id -> status, pra avisar quando algo muda
+  balances: [],        // contas e saldos (só admin)
+  transfers: [],       // transferências entre contas (só admin)
   caixaName: '',
   cart: [],
   selectedCategory: 'Todos',
@@ -78,7 +96,11 @@ function dayKey(d) {
   return t.getFullYear() + '-' + (t.getMonth() + 1) + '-' + t.getDate();
 }
 function isToday(iso) { return dayKey(iso) === dayKey(Date.now()); }
-function payLabel(p) { return p === 'dinheiro' ? 'Dinheiro' : (p === 'pix' ? 'Pix' : 'Cartão'); }
+function payLabel(p) {
+  var x = PAYMENTS.filter(function (y) { return y.id === p; })[0];
+  return x ? x.label : (p === 'cartao' ? 'Cartão (antigo)' : String(p));
+}
+function fundoKey() { return KEYS.fundo + '_' + (state.event ? state.event.id : ''); }
 function summarizeItems(items) { return items.map(function (i) { return i.qty + 'x ' + i.name; }).join(', '); }
 function showToast(msg) {
   var t = el('toast');
@@ -150,13 +172,15 @@ async function safe(fn) {
     return { data: null, error: e };
   }
 }
-/* Busca uma tabela inteira (o Supabase devolve no máximo 1000 linhas por vez). */
-async function fetchAll(table, orderCol) {
+/* Busca uma tabela inteira (o Supabase devolve no máximo 1000 linhas por vez).
+   eventId (opcional) filtra pelo evento. */
+async function fetchAll(table, orderCol, eventId) {
   var out = [], from = 0, size = 1000;
   while (true) {
     var r = await safe(function () {
-      return sb.from(table).select('*')
-        .order(orderCol, { ascending: true }).order('id', { ascending: true })
+      var q = sb.from(table).select('*');
+      if (eventId) q = q.eq('event_id', eventId);
+      return q.order(orderCol, { ascending: true }).order('id', { ascending: true })
         .range(from, from + size - 1);
     });
     if (r.error) return { data: null, error: r.error };
@@ -173,37 +197,170 @@ function mapSale(r) {
   return {
     id: r.id, userId: r.user_id, timestamp: r.created_at, items: r.items || [], total: Number(r.total),
     payment: r.payment, recebido: r.recebido === null ? null : Number(r.recebido),
-    troco: r.troco === null ? null : Number(r.troco), caixa: r.caixa
+    troco: r.troco === null ? null : Number(r.troco), caixa: r.caixa,
+    status: r.status || 'ativa', canceledAt: r.canceled_at, cancelReason: r.cancel_reason || ''
   };
 }
+function mapCancel(r) {
+  return {
+    id: r.id, saleId: r.sale_id, eventId: r.event_id, requestedBy: r.requested_by, reason: r.reason,
+    status: r.status, decidedAt: r.decided_at, note: r.decision_note || '', createdAt: r.created_at
+  };
+}
+function mapAccount(r) {
+  return {
+    id: r.id, name: r.name, kind: r.kind, eventId: r.event_id, opening: Number(r.opening_balance),
+    transfersIn: Number(r.transfers_in), transfersOut: Number(r.transfers_out),
+    salesIn: Number(r.sales_in), expensesOut: Number(r.expenses_out), balance: Number(r.balance), createdAt: r.created_at
+  };
+}
+function eventCashAccount() {
+  if (!state.event) return null;
+  return state.balances.filter(function (a) { return a.kind === 'caixa' && a.eventId === state.event.id; })[0] || null;
+}
+function mapTransfer(r) {
+  return {
+    id: r.id, from: r.from_account, to: r.to_account, amount: Number(r.amount), description: r.description || '',
+    date: r.occurred_at, eventId: r.event_id, createdAt: r.created_at
+  };
+}
+function mapEvent(r) {
+  return { id: r.id, name: r.name, date: r.event_date, status: r.status, notes: r.notes, receiptsAccountId: r.receipts_account_id || null, createdAt: r.created_at };
+}
+function mapExpense(r) {
+  return {
+    id: r.id, eventId: r.event_id, category: r.category, description: r.description, amount: Number(r.amount),
+    productId: r.product_id, qty: r.qty === null ? null : Number(r.qty), paidBy: r.paid_by || '', accountId: r.account_id || null,
+    paidAt: r.paid_at, reimbursed: !!r.reimbursed, createdAt: r.created_at
+  };
+}
+function mapTotals(r) {
+  return { eventId: r.event_id, name: r.name, date: r.event_date, status: r.status, revenue: Number(r.revenue), salesCount: r.sales_count, expenses: Number(r.expenses) };
+}
 
-/* Carrega produtos e vendas. silent = não mostra aviso de erro (usado no polling). */
+/* ---------- Evento em uso ---------- */
+function statusLabel(st) { return st === 'aberto' ? 'Aberto' : (st === 'encerrado' ? 'Encerrado' : 'Planejado'); }
+function eventIsOpen() { return !!(state.event && state.event.status === 'aberto'); }
+/* Operador usa sempre o evento aberto. Admin usa o que escolheu (ou o aberto, ou o mais recente). */
+function pickEvent(events) {
+  var open = events.filter(function (e) { return e.status === 'aberto'; })[0] || null;
+  if (!isAdmin()) return open;
+  var saved = lsGet(KEYS.eventId, '');
+  return events.filter(function (e) { return e.id === saved; })[0] || open || events[events.length - 1] || null;
+}
+function renderEventInfo() {
+  var ev = state.event, sub = '';
+  if (state.currentUser) {
+    if (ev) sub = ev.name + (ev.status === 'aberto' ? '' : ' (' + statusLabel(ev.status).toLowerCase() + ')');
+    else sub = isAdmin() ? 'Nenhum evento — crie um em Eventos' : 'Nenhum evento aberto';
+  }
+  el('topSub').textContent = sub || 'Caixa do evento';
+  /* Tela de vendas: só aparece com evento aberto */
+  var canSell = !state.currentUser || !state.loaded || eventIsOpen();
+  el('venderBody').style.display = canSell ? '' : 'none';
+  var hint = el('noEventHint');
+  hint.style.display = canSell ? 'none' : 'block';
+  if (!canSell) {
+    hint.textContent = ev
+      ? 'O evento "' + ev.name + '" está ' + statusLabel(ev.status).toLowerCase() + '. ' + (isAdmin() ? 'Abra o evento em Eventos pra vender.' : 'Peça pro admin abrir o evento.')
+      : (isAdmin() ? 'Nenhum evento criado ainda. Vá em Eventos e crie o primeiro.' : 'Nenhum evento aberto. Peça pro admin abrir o evento.');
+  }
+  el('venderSub').textContent = ev ? ev.name : '';
+}
+
+/* Carrega eventos e, do evento em uso, produtos/vendas (e gastos, se admin).
+   silent = não mostra aviso de erro (usado no polling). */
 async function loadAll(silent) {
   if (state.loading || !state.currentUser) return false;
   state.loading = true;
   var version = state.mutations;
-  var p = await fetchAll('products', 'created_at');
-  var s = p.error ? { error: p.error } : await fetchAll('sales', 'created_at');
+  var admin = isAdmin();
+  var empty = { data: [], error: null };
+
+  var ev = await fetchAll('events', 'created_at');
+  var events = ev.error ? [] : ev.data.map(mapEvent);
+  var chosen = ev.error ? null : pickEvent(events);
+  var p = empty, s = empty, x = empty, c = empty, t = { data: null, error: null };
+  if (!ev.error && chosen) {
+    p = await fetchAll('products', 'created_at', chosen.id);
+    s = p.error ? p : await fetchAll('sales', 'created_at', chosen.id);
+    x = (admin && !s.error) ? await fetchAll('expenses', 'paid_at', chosen.id) : empty;
+    c = s.error ? s : await fetchAll('cancel_requests', 'created_at', chosen.id);
+  }
+  var ac = empty, tr = empty;
+  if (admin && !ev.error) {
+    ac = await fetchAll('account_balances', 'created_at');
+    tr = ac.error ? ac : await fetchAll('transfers', 'created_at');
+  }
+  if (admin && !ev.error) {
+    t = await safe(function () { return sb.from('event_totals').select('*').order('created_at', { ascending: true }); });
+  }
   state.loading = false;
-  if (p.error || s.error) {
-    if (!silent) showToast(friendlyError(p.error || s.error));
+
+  var err = ev.error || p.error || s.error || x.error || c.error || ac.error || tr.error;
+  if (err) {
+    if (!silent) showToast(friendlyError(err));
     return false;
   }
   if (version !== state.mutations) return false;   // algo mudou localmente durante a busca
+
+  var changed = (chosen ? chosen.id : null) !== (state.event ? state.event.id : null);
+  if (changed && state.cart.length) {
+    state.cart = []; state.pendingSale = null; limparPagamento(); renderCart();
+    showToast('O evento mudou, o pedido foi limpo.');
+  }
+  state.events = events;
+  state.event = chosen;
   state.products = p.data.map(mapProduct);
   state.sales = s.data.map(mapSale);
+  state.expenses = x.data.map(mapExpense);
+  var newCancels = c.data.map(mapCancel);
+  if (changed) state.cancelStatus = null;
+  notifyCancelChanges(newCancels);
+  state.cancels = newCancels;
+  state.balances = ac.data.map(mapAccount);
+  state.transfers = tr.data.map(mapTransfer);
+  if (t.data && !t.error) state.totals = t.data.map(mapTotals);
   state.loaded = true;
   renderAll();
   return true;
+}
+/* Avisa o admin de pedido novo e o operador de decisão (nunca na primeira carga). */
+function notifyCancelChanges(list) {
+  var prev = state.cancelStatus, next = {};
+  list.forEach(function (r) { next[r.id] = r.status; });
+  if (prev && state.currentUser) {
+    list.forEach(function (r) {
+      if (isAdmin() && r.status === 'pendente' && !(r.id in prev)) {
+        var sale = state.sales.filter(function (x) { return x.id === r.saleId; })[0];
+        showToast('Novo pedido de cancelamento' + (sale ? ' de ' + sale.caixa : ''));
+      }
+      if (!isAdmin() && r.requestedBy === state.currentUser.id && prev[r.id] === 'pendente' && r.status !== 'pendente') {
+        showToast(r.status === 'aprovada' ? 'Seu pedido de cancelamento foi APROVADO' : 'Seu pedido de cancelamento foi NEGADO');
+      }
+    });
+  }
+  state.cancelStatus = next;
+}
+function pendingCancels() { return state.cancels.filter(function (r) { return r.status === 'pendente'; }); }
+function renderPendBadge() {
+  var b = el('pendBadge');
+  if (!b) return;
+  var n = isAdmin() ? pendingCancels().length : 0;
+  b.textContent = n; b.style.display = n ? 'inline-block' : 'none';
 }
 function refreshData(manual) {
   loadAll(!manual).then(function (ok) { if (manual && ok) showToast('Atualizado'); });
 }
 function renderAll() {
+  renderEventInfo();
   renderCategoryChips(); renderProductGrid(); renderTodayBar();
   var v = currentView();
   if (v === 'produtos') renderProductList();
   if (v === 'relatorio') { populateFiltroCaixa(); renderRelatorio(); }
+  renderEventSelect();
+  renderPendBadge();
+  renderAdminView(v);
 }
 var pollTimer = null;
 function startPolling() {
@@ -224,7 +381,7 @@ function applyTheme(theme) {
     b.classList.toggle('selected', b.getAttribute('data-theme-opt') === theme);
   });
 }
-function setTheme(theme) { lsSet(KEYS.theme, theme); applyTheme(theme); }
+function setTheme(theme) { lsSet(KEYS.theme, theme); applyTheme(theme); onThemeChanged(); }
 
 /* ---------- Modal ---------- */
 function isModalOpen() { return el('modalRoot').classList.contains('active'); }
@@ -308,12 +465,22 @@ async function afterLogin(user) {
   state.caixaName = pr.data.name;
   el('caixaBadge').textContent = state.caixaName;
   hideGate();
-  applyNavVisibility();
-  doSwitchView('vender');
+  applyRole();
+  el('filtroPeriodo').value = isAdmin() ? 'tudo' : 'hoje';
+  doSwitchView(isAdmin() ? 'dashboard' : 'vender');
   renderAll();
-  await loadAll(false);
+  var ok = await loadAll(false);
+  if (!ok && !state.loaded) retryInitialLoad(1);
   startPolling();
   return true;
+}
+/* Se a primeira carga falhar (wifi oscilando), tenta de novo a cada 3 s em vez de esperar o próximo ciclo. */
+function retryInitialLoad(n) {
+  if (state.loaded || !state.currentUser || n > 8) return;
+  setTimeout(function () {
+    if (state.loaded || !state.currentUser) return;
+    loadAll(true).then(function (ok) { if (!ok && !state.loaded) retryInitialLoad(n + 1); });
+  }, 3000);
 }
 
 async function boot() {
@@ -329,13 +496,15 @@ async function boot() {
 
 function resetSession() {
   stopPolling();
-  state.currentUser = null; state.products = []; state.sales = []; state.cart = [];
+  state.currentUser = null; state.events = []; state.event = null; state.products = []; state.sales = [];
+  state.expenses = []; state.totals = []; state.cancels = []; state.cancelStatus = null;
+  state.balances = []; state.transfers = []; state.cart = [];
   state.payment = null; state.pendingSale = null; state.loaded = false; state.saving = false;
   closeModal();
   el('idleScreen').classList.remove('active');
   limparPagamento();
-  renderCart(); renderCategoryChips(); renderProductGrid(); renderTodayBar();
-  applyNavVisibility();
+  renderCart(); renderCategoryChips(); renderProductGrid(); renderTodayBar(); renderEventInfo();
+  applyRole();
   doSwitchView('vender');
   showGate('');
 }
@@ -367,45 +536,58 @@ function currentView() {
   var v = document.querySelector('.view.active');
   return v ? v.id.replace('view-', '') : 'vender';
 }
-function applyNavVisibility() {
+/* Liga o layout certo: admin = barra lateral; operador = barra inferior. */
+function applyRole() {
   var admin = isAdmin();
-  var prodBtn = document.querySelector('.bottomnav button[data-view="produtos"]');
-  if (prodBtn) prodBtn.style.display = admin ? '' : 'none';
+  document.body.classList.toggle('admin-mode', admin);
   el('resetDataCard').style.display = admin ? '' : 'none';
+  el('sbUser').textContent = state.currentUser ? ('👤 ' + state.currentUser.name) : '';
+  if (!admin) toggleSidebar(false);
 }
+var ADMIN_VIEWS = ['dashboard', 'produtos', 'estoque', 'gastos', 'eventos', 'contas', 'cancelamentos'];
 function switchView(name) {
-  if (name === 'produtos' && !isAdmin()) { showToast('Só admins acessam Produtos'); return; }
+  if (ADMIN_VIEWS.indexOf(name) !== -1 && !isAdmin()) { showToast('Só admins acessam essa área'); return; }
   doSwitchView(name);
 }
 function doSwitchView(name) {
   document.querySelectorAll('.view').forEach(function (v) { v.classList.remove('active'); });
   el('view-' + name).classList.add('active');
-  document.querySelectorAll('.bottomnav button').forEach(function (b) {
+  document.querySelectorAll('.bottomnav button, .sb-nav button').forEach(function (b) {
     b.classList.toggle('active', b.getAttribute('data-view') === name);
   });
-  if (name === 'vender') { renderCategoryChips(); renderProductGrid(); renderTodayBar(); }
+  if (name === 'vender') { renderEventInfo(); renderCategoryChips(); renderProductGrid(); renderTodayBar(); }
   if (name === 'produtos') { renderProductList(); renderComboEditor(); }
   if (name === 'relatorio') { populateFiltroCaixa(); renderRelatorio(); loadAll(true); }
-  if (name === 'config') { applyTheme(getSavedTheme()); renderLoginSection(); applyNavVisibility(); }
+  if (name === 'config') { applyTheme(getSavedTheme()); renderLoginSection(); applyRole(); }
+  if ((name === 'contas' || name === 'dashboard') && state.loaded) loadAll(true);   // saldos sempre atualizados ao abrir
+  renderAdminView(name);
+  if (ADMIN_VIEWS.indexOf(name) !== -1 || isAdmin()) toggleSidebar(false);
   window.scrollTo(0, 0);
 }
 
 /* ---------- Vender ---------- */
+function activeSales() { return state.sales.filter(function (s) { return s.status !== 'cancelada'; }); }
 function ownSales() {
   if (!state.currentUser) return [];
   return state.sales.filter(function (s) { return s.userId === state.currentUser.id; });
 }
-function lastOwnSale() {
-  var mine = ownSales();
-  return mine.length ? mine[mine.length - 1] : null;
+function myRequests() {
+  if (!state.currentUser) return [];
+  return state.cancels.filter(function (r) { return r.requestedBy === state.currentUser.id; });
+}
+function pendingRequestFor(saleId) {
+  return state.cancels.filter(function (r) { return r.saleId === saleId && r.status === 'pendente'; })[0] || null;
 }
 
 function renderTodayBar() {
-  var mine = ownSales().filter(function (s) { return isToday(s.timestamp); });
+  var mine = ownSales().filter(function (s) { return s.status !== 'cancelada' && isToday(s.timestamp); });
   var total = mine.reduce(function (s, x) { return s + x.total; }, 0);
   el('tbCount').textContent = mine.length;
   el('tbTotal').textContent = fmtMoney(total);
-  el('undoBtn').style.display = lastOwnSale() ? 'block' : 'none';
+  var has = ownSales().length > 0;
+  var pend = myRequests().filter(function (r) { return r.status === 'pendente'; }).length;
+  el('undoBtn').style.display = has ? 'block' : 'none';
+  el('undoBtn').textContent = '✖ Cancelar venda…' + (pend && !isAdmin() ? ' (' + pend + ' aguardando admin)' : '');
 }
 
 function renderCategoryChips() {
@@ -440,7 +622,7 @@ function renderProductGrid() {
     return;
   }
   hint.textContent = isAdmin()
-    ? 'Nenhum produto cadastrado ainda. Vá em "Produtos" pra cadastrar o cardápio.'
+    ? 'Nenhum produto neste evento ainda. Vá em Cardápio pra cadastrar (ou copiar de outro evento).'
     : 'Nenhum produto cadastrado ainda. Peça pro admin cadastrar o cardápio.';
   hint.style.display = state.products.length ? 'none' : 'block';
   state.products
@@ -533,7 +715,7 @@ function calcTroco() {
 }
 
 function updateFinalizeState() {
-  var valid = state.cart.length > 0 && !!state.payment && !state.saving;
+  var valid = state.cart.length > 0 && !!state.payment && !state.saving && eventIsOpen();
   if (state.payment === 'dinheiro') {
     var recebido = parseMoney(el('recebidoInput').value);
     valid = valid && recebido > 0 && round2(recebido) >= cartTotalValue();
@@ -566,6 +748,7 @@ function saleSignature(recebido) {
 
 async function finalizarVenda() {
   if (el('finalizeBtn').disabled || state.saving || !state.currentUser) return;
+  if (!eventIsOpen()) { showToast('O evento não está aberto.'); return; }
   var total = cartTotalValue();
   var recebido = state.payment === 'dinheiro' ? round2(parseMoney(el('recebidoInput').value)) : null;
   var sig = saleSignature(recebido);
@@ -573,6 +756,7 @@ async function finalizarVenda() {
 
   var row = {
     id: state.pendingSale.id,
+    event_id: state.event.id,
     caixa: state.caixaName,
     payment: state.payment,
     total: total,
@@ -604,63 +788,176 @@ async function finalizarVenda() {
   renderTodayBar();
 }
 
-/* ---------- Desfazer última venda ---------- */
-async function deleteSaleById(id) {
-  var r = await safe(function () { return sb.from('sales').delete().eq('id', id).select(); });
-  if (r.error) return { ok: false, msg: friendlyError(r.error) };
-  if (!r.data || !r.data.length) {
-    return { ok: false, msg: isAdmin() ? 'Venda não encontrada (talvez já tenha sido apagada).' : 'Só dá pra desfazer vendas dos últimos ' + UNDO_WINDOW_MIN + ' minutos.' };
+/* ---------- Cancelar venda ---------- */
+/* Operador: pede, e o admin aprova ou nega. Admin: cancela direto.
+   A venda cancelada continua registrada (com motivo), só sai dos totais. */
+function itemsToCart(items) {
+  state.cart = items.map(function (i) {
+    return { productId: i.productId || ('x' + uuid()), name: i.name, price: i.price, qty: i.qty, isCombo: !!i.isCombo, components: i.components || [] };
+  });
+  state.pendingSale = null;
+  limparPagamento();
+  renderCart();
+}
+function refazerPedido(items) {
+  if (!eventIsOpen()) { showToast('O evento não está aberto.'); return; }
+  function go() {
+    itemsToCart(items);
+    doSwitchView('vender');
+    showToast('Pedido de volta no carrinho. Corrija e finalize.');
   }
-  state.mutations++;
-  state.sales = state.sales.filter(function (x) { return x.id !== id; });
-  return { ok: true };
+  if (!state.cart.length) { closeModal(); go(); return; }
+  confirmModal({
+    icon: '🛒', title: 'Substituir o pedido da tela?',
+    text: 'Já existe um pedido sendo montado. Ele será trocado pelo pedido cancelado.',
+    confirmLabel: 'Substituir', onConfirm: go
+  });
+}
+function reqStatusPill(st) {
+  return h('span', { className: 'status-pill req-' + st, text: st === 'pendente' ? 'Aguardando admin' : (st === 'aprovada' ? 'Aprovado' : 'Negado') });
 }
 
-function desfazerUltimaVenda() {
-  var s = lastOwnSale();
-  if (!s) return;
+function abrirCancelamento() {
+  var admin = isAdmin();
+  var mine = ownSales().slice().reverse().filter(function (s) { return s.status !== 'cancelada'; }).slice(0, 15);
+  var reqs = myRequests().slice().reverse().slice(0, 8);
+  var sales = h('div', null);
+  if (!mine.length) sales.appendChild(h('div', { className: 'empty-hint', text: 'Você não tem vendas ativas neste evento.' }));
+  mine.forEach(function (s) {
+    var pend = pendingRequestFor(s.id);
+    sales.appendChild(h('div', { className: 'cx-row' },
+      h('div', { className: 'cx-main' },
+        h('div', { className: 'cx-items', text: summarizeItems(s.items) }),
+        h('div', { className: 'cx-meta', text: timeStr(s.timestamp) + ' · ' + payLabel(s.payment) })
+      ),
+      h('div', { className: 'cx-right' },
+        h('b', { text: fmtMoney(s.total) }),
+        pend ? reqStatusPill('pendente')
+             : h('button', { className: 'btn-secondary btn-small', type: 'button', onclick: function () { pedirMotivoCancelamento(s); } }, admin ? 'Cancelar' : 'Pedir cancelamento')
+      )
+    ));
+  });
+  var history = h('div', null);
+  if (!admin && reqs.length) {
+    history.appendChild(h('div', { className: 'section-title', text: 'Meus pedidos' }));
+    reqs.forEach(function (r) {
+      var sale = state.sales.filter(function (x) { return x.id === r.saleId; })[0];
+      history.appendChild(h('div', { className: 'cx-row' },
+        h('div', { className: 'cx-main' },
+          h('div', { className: 'cx-items', text: sale ? summarizeItems(sale.items) : 'Venda' }),
+          h('div', { className: 'cx-meta', text: 'Motivo: ' + r.reason }),
+          r.note ? h('div', { className: 'cx-meta', text: 'Resposta do admin: ' + r.note }) : null
+        ),
+        h('div', { className: 'cx-right' },
+          sale ? h('b', { text: fmtMoney(sale.total) }) : null,
+          reqStatusPill(r.status),
+          r.status === 'pendente' ? h('button', { className: 'btn-secondary btn-small', type: 'button', onclick: function () { retirarPedido(r.id); } }, 'Retirar') : null,
+          r.status === 'aprovada' && sale ? h('button', { className: 'btn-secondary btn-small', type: 'button', onclick: function () { refazerPedido(sale.items); } }, 'Refazer pedido') : null
+        )
+      ));
+    });
+  }
+  openModal(h('div', null,
+    h('div', { className: 'modal-icon' }, '✖️'),
+    h('h3', { className: 'modal-title', text: 'Cancelar venda' }),
+    h('p', { className: 'modal-sub', text: admin ? 'Como admin, o cancelamento vale na hora. A venda fica registrada como cancelada.' : 'Escolha a venda e explique o motivo. O admin precisa aprovar, e a venda só sai do caixa depois disso.' }),
+    sales, history,
+    h('div', { className: 'modal-actions' }, h('button', { className: 'modal-cancel', type: 'button', onclick: closeModal }, 'Fechar'))
+  ));
+}
+
+function pedirMotivoCancelamento(sale) {
+  var admin = isAdmin();
+  var reason = h('input', { type: 'text', placeholder: 'Motivo (ex: cliente desistiu, errei o pedido)', autocomplete: 'off' });
   var busy = false;
-  function act(afterOk) {
+  function go(refazer) {
     return async function () {
+      var motivo = reason.value.trim();
+      if (!motivo) { showToast('Escreva o motivo do cancelamento'); reason.focus(); return; }
       if (busy) return;
       busy = true;
-      var res = await deleteSaleById(s.id);
+      var ok = admin ? await cancelarVendaAdmin(sale, motivo, refazer) : await enviarPedidoCancelamento(sale, motivo);
       busy = false;
-      closeModal();
-      renderTodayBar();
-      if (!res.ok) { showToast(res.msg); return; }
-      afterOk();
+      if (ok) closeModal();
     };
   }
   openModal(h('div', null,
-    h('div', { className: 'modal-icon' }, '↩️'),
-    h('h3', { className: 'modal-title', text: 'Desfazer a última venda?' }),
+    h('div', { className: 'modal-icon' }, '✖️'),
+    h('h3', { className: 'modal-title', text: admin ? 'Cancelar esta venda?' : 'Pedir cancelamento' }),
     h('div', { className: 'undo-summary' },
-      h('div', { className: 'us-items', text: summarizeItems(s.items) }),
-      h('div', { className: 'us-meta', text: dateTimeStr(s.timestamp) + ' · ' + payLabel(s.payment) }),
-      h('div', { className: 'us-total', text: fmtMoney(s.total) })
+      h('div', { className: 'us-items', text: summarizeItems(sale.items) }),
+      h('div', { className: 'us-meta', text: dateTimeStr(sale.timestamp) + ' · ' + payLabel(sale.payment) + ' · ' + sale.caixa }),
+      h('div', { className: 'us-total', text: fmtMoney(sale.total) })
     ),
-    s.payment === 'dinheiro'
-      ? h('p', { className: 'modal-sub', text: 'Se for devolver ao cliente: ' + fmtMoney(s.total) + ' (o troco dado já foi descontado).' })
-      : null,
+    sale.payment === 'dinheiro' && admin ? h('p', { className: 'modal-sub', text: 'Se for devolver ao cliente: ' + fmtMoney(sale.total) + '.' }) : null,
+    h('div', { className: 'form-row' }, h('label', { text: 'Motivo' }), reason),
     h('div', { className: 'modal-actions' },
-      h('button', {
-        className: 'btn-primary', type: 'button', onclick: act(function () {
-          state.cart = s.items.map(function (i) {
-            return { productId: i.productId || ('x' + uuid()), name: i.name, price: i.price, qty: i.qty, isCombo: !!i.isCombo, components: i.components || [] };
-          });
-          state.pendingSale = null;
-          limparPagamento();
-          renderCart();
-          showToast('Venda desfeita — pedido voltou pro carrinho');
-        })
-      }, 'Desfazer e corrigir o pedido'),
-      h('button', {
-        className: 'btn-secondary', type: 'button', style: 'width:100%;', onclick: act(function () { showToast('Venda desfeita'); })
-      }, 'Só desfazer'),
-      h('button', { className: 'modal-cancel', type: 'button', onclick: closeModal }, 'Cancelar')
+      h('button', { className: 'btn-primary', type: 'button', onclick: go(false) }, admin ? 'Cancelar venda' : 'Enviar pedido ao admin'),
+      admin ? h('button', { className: 'btn-secondary', type: 'button', style: 'width:100%;', onclick: go(true) }, 'Cancelar e refazer o pedido') : null,
+      h('button', { className: 'modal-cancel', type: 'button', onclick: closeModal }, 'Voltar')
     )
   ));
+  setTimeout(function () { reason.focus(); }, 80);
+}
+
+async function enviarPedidoCancelamento(sale, motivo) {
+  var r = await safe(function () { return sb.from('cancel_requests').insert({ sale_id: sale.id, reason: motivo }).select(); });
+  if (r.error) {
+    showToast(r.error.code === '23505' ? 'Já existe um pedido pendente pra essa venda.'
+      : (r.error.code === '42501' ? 'Não foi possível pedir: a venda precisa ser sua, estar ativa e o evento aberto.' : friendlyError(r.error)));
+    return false;
+  }
+  state.mutations++;
+  var req = mapCancel(r.data[0]);
+  state.cancels.push(req);
+  if (state.cancelStatus) state.cancelStatus[req.id] = req.status;
+  renderTodayBar();
+  showToast('Pedido enviado. Aguarde o admin aprovar.');
+  return true;
+}
+
+async function retirarPedido(id) {
+  var r = await safe(function () { return sb.from('cancel_requests').delete().eq('id', id).select(); });
+  if (r.error) { showToast(friendlyError(r.error)); return; }
+  if (!r.data || !r.data.length) { showToast('Esse pedido já foi decidido.'); return; }
+  state.mutations++;
+  state.cancels = state.cancels.filter(function (x) { return x.id !== id; });
+  if (state.cancelStatus) delete state.cancelStatus[id];
+  renderTodayBar();
+  showToast('Pedido retirado');
+  abrirCancelamento();
+}
+
+/* Admin cancela direto. Devolve true se deu certo. */
+async function cancelarVendaAdmin(sale, motivo, refazer) {
+  var r = await safe(function () { return sb.rpc('cancel_sale', { p_sale: sale.id, p_reason: motivo }); });
+  if (r.error) { showToast(friendlyError(r.error)); return false; }
+  state.mutations++;
+  state.sales.forEach(function (x) { if (x.id === sale.id) { x.status = 'cancelada'; x.cancelReason = motivo; } });
+  state.cancels.forEach(function (x) { if (x.saleId === sale.id && x.status === 'pendente') x.status = 'aprovada'; });
+  if (state.cancelStatus) state.cancels.forEach(function (x) { state.cancelStatus[x.id] = x.status; });
+  renderAll();
+  showToast('Venda cancelada');
+  loadAll(true);                       // saldos das contas mudam com o cancelamento
+  if (refazer && eventIsOpen()) { itemsToCart(sale.items); doSwitchView('vender'); }
+  return true;
+}
+
+function reativarVenda(sale) {
+  confirmModal({
+    icon: '↩️', title: 'Reativar esta venda?',
+    text: summarizeItems(sale.items) + ' · ' + fmtMoney(sale.total) + ' · ' + payLabel(sale.payment) + '. Ela volta a contar nos totais.',
+    confirmLabel: 'Reativar venda',
+    onConfirm: async function () {
+      var r = await safe(function () { return sb.rpc('restore_sale', { p_sale: sale.id }); });
+      if (r.error) { showToast(friendlyError(r.error)); return; }
+      state.mutations++;
+      state.sales.forEach(function (x) { if (x.id === sale.id) { x.status = 'ativa'; x.cancelReason = ''; } });
+      renderAll();
+      showToast('Venda reativada');
+      loadAll(true);
+    }
+  });
 }
 
 /* ---------- Produtos / combos ---------- */
@@ -729,6 +1026,7 @@ function resetProductForm() {
 
 async function salvarProduto() {
   if (!isAdmin() || state.saving) return;
+  if (!state.event) { showToast('Crie ou selecione um evento primeiro.'); return; }
   var nome = el('prodNome').value.trim();
   var preco = round2(parseMoney(el('prodPreco').value));
   var isCombo = el('prodCombo').checked;
@@ -737,7 +1035,7 @@ async function salvarProduto() {
   if (!(preco > 0)) { showToast('Digite um preço válido'); return; }
   if (isCombo && !state.comboDraft.length) { showToast('Adicione pelo menos um item ao combo'); return; }
 
-  var row = { name: nome, price: preco, category: cat, is_combo: isCombo, components: isCombo ? state.comboDraft.slice() : [] };
+  var row = { event_id: state.event.id, name: nome, price: preco, category: cat, is_combo: isCombo, components: isCombo ? state.comboDraft.slice() : [] };
   var editing = state.editingId;
   state.saving = true;
   el('salvarProdBtn').disabled = true;
@@ -836,16 +1134,22 @@ function populateFiltroCaixa() {
   sel.value = caixas.indexOf(current) !== -1 ? current : 'Todos';
 }
 
-function computeTotals(filtro, periodo) {
-  var sales = state.sales.filter(function (s) {
+function filteredSales(filtro, periodo) {
+  return state.sales.filter(function (s) {
     return (filtro === 'Todos' || s.caixa === filtro) && (periodo === 'tudo' || isToday(s.timestamp));
   });
-  var t = { sales: sales, count: sales.length, total: 0, dinheiro: 0, pix: 0, cartao: 0 };
-  sales.forEach(function (s) {
+}
+/* Totais só com vendas ATIVAS; t.all traz também as canceladas (pra mostrar na lista). */
+function computeTotals(filtro, periodo) {
+  var all = filteredSales(filtro, periodo);
+  var act = all.filter(function (s) { return s.status !== 'cancelada'; });
+  var t = { sales: act, all: all, count: act.length, canceled: all.length - act.length,
+            total: 0, dinheiro: 0, pix: 0, credito: 0, debito: 0, cartao: 0 };
+  act.forEach(function (s) {
     t.total += s.total;
     if (t[s.payment] !== undefined) t[s.payment] += s.total;
   });
-  ['total', 'dinheiro', 'pix', 'cartao'].forEach(function (k) { t[k] = round2(t[k]); });
+  ['total', 'dinheiro', 'pix', 'credito', 'debito', 'cartao'].forEach(function (k) { t[k] = round2(t[k]); });
   return t;
 }
 function currentFilters() {
@@ -858,42 +1162,40 @@ function renderRelatorio() {
   el('repTotal').textContent = fmtMoney(t.total);
   el('repDinheiro').textContent = fmtMoney(t.dinheiro);
   el('repPix').textContent = fmtMoney(t.pix);
+  el('repCredito').textContent = fmtMoney(t.credito);
+  el('repDebito').textContent = fmtMoney(t.debito);
   el('repCartao').textContent = fmtMoney(t.cartao);
+  el('repCartaoCard').style.display = t.cartao > 0 ? '' : 'none';
   el('repCount').textContent = t.count;
+  el('repCanceladas').textContent = t.canceled;
 
   var listEl = el('salesList');
   listEl.innerHTML = '';
-  el('noSalesHint').style.display = t.count ? 'none' : 'block';
+  el('noSalesHint').style.display = t.all.length ? 'none' : 'block';
   var admin = isAdmin();
-  t.sales.slice().reverse().forEach(function (s) {
+  t.all.slice().reverse().forEach(function (s) {
     var summary = summarizeItems(s.items);
-    listEl.appendChild(h('div', { className: 'sale-row' },
+    var canceled = s.status === 'cancelada';
+    var pend = !canceled ? pendingRequestFor(s.id) : null;
+    var meta = (f.periodo === 'tudo' ? dateTimeStr(s.timestamp) : timeStr(s.timestamp)) + ' · ' + s.caixa +
+      (canceled ? ' · CANCELADA' + (s.cancelReason ? ': ' + s.cancelReason : '') : '') + (pend ? ' · cancelamento pendente' : '');
+    var action = null;
+    if (admin) {
+      action = canceled
+        ? h('button', { className: 'sr-del', type: 'button', 'aria-label': 'Reativar venda', title: 'Reativar', onclick: function () { reativarVenda(s); } }, '↩')
+        : h('button', { className: 'sr-del', type: 'button', 'aria-label': 'Cancelar venda', title: 'Cancelar', onclick: function () { pedirMotivoCancelamento(s); } }, '✕');
+    } else {
+      action = h('span', { className: 'sr-del' });
+    }
+    listEl.appendChild(h('div', { className: 'sale-row' + (canceled ? ' canceled' : '') },
       h('div', { className: 'sr-left' },
-        h('div', { text: summary.length > 34 ? summary.slice(0, 34) + '…' : summary }),
-        h('div', { className: 'sr-time', text: (f.periodo === 'tudo' ? dateTimeStr(s.timestamp) : timeStr(s.timestamp)) + ' · ' + s.caixa })
+        h('div', { className: 'sr-items', text: summary.length > 34 ? summary.slice(0, 34) + '…' : summary }),
+        h('div', { className: 'sr-time', text: meta })
       ),
       h('span', { className: 'sr-badge badge-' + s.payment, text: payLabel(s.payment) }),
       h('span', { className: 'sr-value', text: fmtMoney(s.total) }),
-      admin
-        ? h('button', { className: 'sr-del', type: 'button', 'aria-label': 'Apagar venda', onclick: function () { excluirVenda(s.id); } }, '✕')
-        : h('span', { className: 'sr-del' })
+      action
     ));
-  });
-}
-
-function excluirVenda(id) {
-  var s = state.sales.find(function (x) { return x.id === id; });
-  if (!s || !isAdmin()) return;
-  confirmModal({
-    icon: '🗑️', title: 'Apagar esta venda?',
-    text: summarizeItems(s.items) + ' · ' + fmtMoney(s.total) + ' · ' + payLabel(s.payment) + ' · ' + dateTimeStr(s.timestamp) + ' · ' + s.caixa,
-    confirmLabel: 'Apagar venda', danger: true,
-    onConfirm: async function () {
-      var res = await deleteSaleById(id);
-      if (!res.ok) { showToast(res.msg); return; }
-      populateFiltroCaixa(); renderRelatorio(); renderTodayBar();
-      showToast('Venda apagada');
-    }
   });
 }
 
@@ -903,13 +1205,18 @@ function abrirFechamento() {
   var t = computeTotals(f.caixa, f.periodo);
 
   var fundoInput = h('input', { type: 'text', inputmode: 'decimal', placeholder: '0,00' });
-  fundoInput.value = lsGet(KEYS.fundo, '');
+  var savedFundo = lsGet(fundoKey(), '');
+  if (!savedFundo && isAdmin() && f.caixa === 'Todos') {
+    var cash = eventCashAccount();                       // fundo = o que entrou no caixa do evento por transferência
+    if (cash && cash.opening + cash.transfersIn > 0) savedFundo = String(round2(cash.opening + cash.transfersIn)).replace('.', ',');
+  }
+  fundoInput.value = savedFundo;
   var contadoInput = h('input', { type: 'text', inputmode: 'decimal', placeholder: '0,00' });
   var esperadoEl = h('span', { className: 'fc-strong' });
   var diffBox = h('div', { className: 'diff-box' });
 
   function update() {
-    lsSet(KEYS.fundo, fundoInput.value);
+    lsSet(fundoKey(), fundoInput.value);
     var esperado = round2(parseMoney(fundoInput.value) + t.dinheiro);
     esperadoEl.textContent = fmtMoney(esperado);
     if (!contadoInput.value.trim()) {
@@ -932,12 +1239,14 @@ function abrirFechamento() {
   openModal(h('div', null,
     h('div', { className: 'modal-icon' }, '🧾'),
     h('h3', { className: 'modal-title', text: 'Fechamento de caixa' }),
-    h('p', { className: 'modal-sub', text: (f.caixa === 'Todos' ? 'Todos os caixas' : f.caixa) + ' · ' + (f.periodo === 'tudo' ? 'todo o período' : 'hoje') }),
+    h('p', { className: 'modal-sub', text: (state.event ? state.event.name + ' · ' : '') + (f.caixa === 'Todos' ? 'Todos os caixas' : f.caixa) + ' · ' + (f.periodo === 'tudo' ? 'todo o evento' : 'hoje') }),
     h('div', { className: 'fc-summary' },
       row('Vendas', String(t.count)),
       row('💵 Dinheiro', fmtMoney(t.dinheiro)),
       row('📱 Pix', fmtMoney(t.pix)),
-      row('💳 Cartão', fmtMoney(t.cartao)),
+      row('💳 Crédito', fmtMoney(t.credito)),
+      row('💳 Débito', fmtMoney(t.debito)),
+      t.cartao > 0 ? row('💳 Cartão (antigo)', fmtMoney(t.cartao)) : null,
       row('Total', fmtMoney(t.total), 'fc-total')
     ),
     h('p', { className: 'fc-note', text: 'Pix e cartão: confira no extrato do banco e na maquininha.' }),
@@ -954,20 +1263,29 @@ function abrirFechamento() {
 }
 
 /* ---------- Exportar (backup) ---------- */
-function exportarDados() {
-  var payload = { app: 'caixa-luau', version: 3, products: state.products, sales: state.sales, exportedBy: state.caixaName, exportedAt: new Date().toISOString() };
-  var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+function slug(t) { return String(t || 'evento').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''); }
+function downloadFile(name, text, type) {
+  var blob = new Blob([text], { type: type });
   var url = URL.createObjectURL(blob);
-  var stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
-  var a = h('a', { href: url, download: 'caixa-luau-backup-' + stamp + '.json' });
+  var a = h('a', { href: url, download: name });
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+function stampNow() { return new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-'); }
+function exportarDados() {
+  var payload = {
+    app: 'caixa-ejc', version: 5, event: state.event, products: state.products, sales: state.sales, cancelRequests: state.cancels,
+    expenses: isAdmin() ? state.expenses : undefined, exportedBy: state.caixaName, exportedAt: new Date().toISOString()
+  };
+  downloadFile('caixa-backup-' + slug(state.event && state.event.name) + '-' + stampNow() + '.json', JSON.stringify(payload, null, 2), 'application/json');
   showToast('Backup exportado');
 }
 
-/* ---------- Apagar todas as vendas (admin) ---------- */
+/* ---------- Apagar todas as vendas do evento (admin) ---------- */
 function apagarVendas() {
   if (!isAdmin()) { showToast('Só admins apagam as vendas'); return; }
+  if (!state.event) { showToast('Nenhum evento selecionado.'); return; }
+  var evt = state.event;
   var t = computeTotals('Todos', 'tudo');
   var typed = h('input', { type: 'text', placeholder: 'Digite APAGAR', autocomplete: 'off', autocapitalize: 'characters' });
   var goBtn = h('button', { className: 'btn-primary btn-primary-danger', type: 'button', disabled: 'disabled' }, 'Apagar todas as vendas');
@@ -978,20 +1296,21 @@ function apagarVendas() {
   goBtn.addEventListener('click', async function () {
     goBtn.setAttribute('disabled', 'disabled');
     var r = await safe(function () {
-      return sb.from('sales').delete({ count: 'exact' }).neq('id', '00000000-0000-0000-0000-000000000000');
+      return sb.from('sales').delete({ count: 'exact' }).eq('event_id', evt.id);
     });
     if (r.error) { showToast(friendlyError(r.error)); return; }
     state.mutations++;
     state.sales = [];
-    lsDel(KEYS.fundo);
+    lsDel(fundoKey());
     closeModal();
-    renderTodayBar(); populateFiltroCaixa(); renderRelatorio();
+    renderAll();
     showToast('Vendas apagadas');
+    loadAll(true);
   });
   openModal(h('div', null,
     h('div', { className: 'modal-icon' }, '⚠️'),
-    h('h3', { className: 'modal-title', text: 'Apagar TODAS as vendas?' }),
-    h('p', { className: 'modal-sub', text: 'Vale pra todos os caixas, não só este aparelho, e não tem volta.' }),
+    h('h3', { className: 'modal-title', text: 'Apagar todas as vendas de "' + evt.name + '"?' }),
+    h('p', { className: 'modal-sub', text: 'Vale pra todos os caixas deste evento, não só este aparelho, e não tem volta. Outros eventos não são afetados.' }),
     h('div', { className: 'fc-summary' },
       h('div', { className: 'fc-row' }, h('span', { text: 'Vendas registradas' }), h('span', { className: 'fc-val', text: String(t.count) })),
       h('div', { className: 'fc-row fc-total' }, h('span', { text: 'Total em vendas' }), h('span', { className: 'fc-val', text: fmtMoney(t.total) }))
@@ -1027,11 +1346,3 @@ function resetIdleTimer() {
     if (!el('idleScreen').classList.contains('active')) resetIdleTimer();
   });
 });
-
-/* ---------- Init ---------- */
-applyTheme(getSavedTheme());
-renderCart();
-renderTodayBar();
-resetIdleTimer();
-applyNavVisibility();
-boot();

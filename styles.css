@@ -713,3 +713,20 @@ body.admin-mode .toast.show { bottom: 52px; }
 .ac-line + .ac-line { border-top: 1px solid var(--border-c); }
 .ac-line.pos span:last-child { color: var(--success-dark); font-weight: 800; }
 .ac-line.neg span:last-child { color: var(--danger); font-weight: 800; }
+
+
+/* ---- Visão geral: cartões de cima ----
+   Fileira 1 (receita, gastos, lucro): maiores. Fileira 2: o resto, esticado na largura toda.
+   O valor nunca quebra de linha (antes o sinal de "−" do lucro negativo ia pra linha de cima). */
+.kpi-value { white-space: nowrap; }
+.kpi-sub { overflow-wrap: anywhere; }
+.kpi-main { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); margin-bottom: 12px; }
+.kpi-main .kpi { padding: 18px 20px; }
+.kpi-main .kpi-value { font-size: clamp(26px, 2.6vw, 34px); }
+.kpi-secondary { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.kpi-secondary:empty { display: none; }
+.kpi-secondary .kpi-value { font-size: clamp(20px, 1.9vw, 24px); }
+@media (max-width: 520px) {
+  .kpi-main { grid-template-columns: 1fr; }
+  .kpi-main .kpi-value { font-size: 28px; }
+}

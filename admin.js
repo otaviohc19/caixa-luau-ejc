@@ -706,8 +706,8 @@ function topProducts(limit) {
 }
 
 function renderDashboard() {
-  var grid = el('kpiGrid');
-  grid.innerHTML = '';
+  var grid = el('kpiGrid'), grid2 = el('kpiGrid2');
+  grid.innerHTML = ''; grid2.innerHTML = '';
   var ev = state.event;
   if (!ev) {
     grid.appendChild(h('div', { className: 'empty-hint', style: 'grid-column:1/-1;', text: 'Nenhum evento ainda. Vá em Eventos e crie o primeiro pra ver os números aqui.' }));
@@ -724,14 +724,14 @@ function renderDashboard() {
   grid.appendChild(kpi('Receita', fmtMoney(revenue), t.count + ' venda(s)' + (t.canceled ? ' · ' + t.canceled + ' cancelada(s)' : '')));
   grid.appendChild(kpi('Gastos', fmtMoney(expenses), state.expenses.length + ' lançamento(s)'));
   grid.appendChild(kpi('Lucro', fmtMoney(profit), revenue > 0 ? 'margem de ' + pct(profit / revenue) : '', profit < 0 ? 'neg' : 'pos'));
-  grid.appendChild(kpi('Ticket médio', fmtMoney(t.count ? revenue / t.count : 0), 'por venda'));
-  grid.appendChild(kpi('A reembolsar', fmtMoney(pend), pend > 0 ? 'ver em Gastos' : 'nada pendente', pend > 0 ? 'warn' : ''));
+  grid2.appendChild(kpi('Ticket médio', fmtMoney(t.count ? revenue / t.count : 0), 'por venda'));
+  grid2.appendChild(kpi('A reembolsar', fmtMoney(pend), pend > 0 ? 'ver em Gastos' : 'nada pendente', pend > 0 ? 'warn' : ''));
   var bancos = state.balances.filter(function (a) { return a.kind === 'banco'; });
-  if (bancos.length) grid.appendChild(kpi('Saldo bancário', fmtMoney(sum(bancos, function (a) { return a.balance; })), bancos.length > 1 ? bancos.length + ' contas' : accountLabel(bancos[0])));
+  if (bancos.length) grid2.appendChild(kpi('Saldo bancário', fmtMoney(sum(bancos, function (a) { return a.balance; })), bancos.length > 1 ? bancos.length + ' contas' : accountLabel(bancos[0])));
   var cx = eventCashAccount();
-  if (cx) grid.appendChild(kpi('Caixa do evento', fmtMoney(cx.balance), 'dinheiro na gaveta (esperado)', cx.balance < 0 ? 'neg' : ''));
+  if (cx) grid2.appendChild(kpi('Caixa do evento', fmtMoney(cx.balance), 'dinheiro na gaveta (esperado)', cx.balance < 0 ? 'neg' : ''));
   var np = pendingCancels().length;
-  if (np) grid.appendChild(kpi('Cancelamentos', String(np), 'aguardando você', 'warn'));
+  if (np) grid2.appendChild(kpi('Cancelamentos', String(np), 'aguardando você', 'warn'));
 
   var c = chartColors();
   var moneyScale = { y: { beginAtZero: true, ticks: { callback: moneyTick }, grid: { color: c.grid } }, x: { grid: { display: false } } };
